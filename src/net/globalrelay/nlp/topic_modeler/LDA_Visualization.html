@@ -1,0 +1,1430 @@
+
+<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/d3/3.5.5/d3.min.js"></script>
+
+<link rel="stylesheet" type="text/css" href="https://cdn.rawgit.com/bmabey/pyLDAvis/files/ldavis.v1.0.0.css">
+
+<div id="ldavis_el335921406368103716249969828584" width="100%" align="center"></div>
+<script type="text/javascript">
+
+/* Original code taken from https://github.com/cpsievert/LDAvis */
+/* Copyright 2013, AT&T Intellectual Property */
+/* MIT Licence */
+
+'use strict';
+
+var LDAvis = function(to_select, data_or_file_name) { //added additional input variable
+
+    // This section sets up the logic for event handling
+    var current_clicked = {
+        what: "nothing",
+        element: undefined
+    },
+        current_hover = {
+            what: "nothing",
+            element: undefined
+        },
+        old_winning_state = {
+            what: "nothing",
+            element: undefined
+        },
+        vis_state = {
+            lambda: 1,
+            topic: 0,
+            term: ""
+        };
+
+    // Set up a few 'global' variables to hold the data:
+    var K, // number of topics
+        R, // number of terms to display in bar chart
+        mdsData, // (x,y) locations and topic proportions
+        mdsData3, // topic proportions for all terms in the viz
+        lamData, // all terms that are among the top-R most relevant for all topics, lambda values
+        lambda = {
+            old: 1,
+            current: 1
+        },
+         // --------- for THE ONE ---------
+        topicNames = [],
+        // --------- nomore for THE ONE -----------
+        color1 = "#1f77b4", // baseline color for default topic circles and overall term frequencies
+        color2 = "#d62728"; // 'highlight' color for selected topics and term-topic frequencies
+
+    // Set the duration of each half of the transition:
+    var duration = 750;
+
+    // Set global margins used for everything
+    var margin = {
+        top: 30,
+        right: 30,
+        bottom: 70,
+        left: 30
+    },
+        mdswidth = 530,
+        mdsheight = 530,
+        barwidth = 530,
+        barheight = 530,
+        termwidth = 90, // width to add between two panels to display terms
+        mdsarea = mdsheight * mdswidth;
+    // controls how big the maximum circle can be
+    // doesn't depend on data, only on mds width and height:
+    var rMax = 60;
+
+    // proportion of area of MDS plot to which the sum of default topic circle areas is set
+    var circle_prop = 0.25;
+    var word_prop = 0.25;
+
+    // opacity of topic circles:
+    var base_opacity = 0.2,
+        highlight_opacity = 0.6;
+
+    // topic/lambda selection names are specific to *this* vis
+    var topic_select = to_select + "-topic";
+    var lambda_select = to_select + "-lambda";
+
+    // get rid of the # in the to_select (useful) for setting ID values
+    var visID = to_select.replace("#", "");
+    var topicID = visID + "-topic";
+    var lambdaID = visID + "-lambda";
+    var termID = visID + "-term";
+    var topicDown = topicID + "-down";
+    var topicUp = topicID + "-up";
+    var topicClear = topicID + "-clear";
+
+    var leftPanelID = visID + "-leftpanel";
+    var barFreqsID = visID + "-bar-freqs";
+    var topID = visID + "-top";
+    var lambdaInputID = visID + "-lambdaInput";
+    var lambdaZeroID = visID + "-lambdaZero";
+    var sliderDivID = visID + "-sliderdiv";
+    var lambdaLabelID = visID + "-lamlabel";
+    
+
+    //////////////////////////////////////////////////////////////////////////////
+
+    // sort array according to a specified object key name
+    // Note that default is decreasing sort, set decreasing = -1 for increasing
+    // adpated from http://stackoverflow.com/questions/16648076/sort-array-on-key-value
+    function fancysort(key_name, decreasing) {
+        decreasing = (typeof decreasing === "undefined") ? 1 : decreasing;
+        return function(a, b) {
+            if (a[key_name] < b[key_name])
+                return 1 * decreasing;
+            if (a[key_name] > b[key_name])
+                return -1 * decreasing;
+            return 0;
+        };
+    }
+
+
+    function visualize(data) {
+        // set the number of topics to global variable K:
+        K = data['mdsDat'].x.length;
+
+        // R is the number of top relevant (or salient) words whose bars we display
+        R = Math.min(data['R'], 30);
+
+        // ----------- fuse for THE ONE ------------
+        var cut_names=0;
+        if(data['mdsDat'].hasOwnProperty('topic.names')){ //if by anycase length of NAMES variable doesn't match overall amount of topics OR variable doesnt exists - set names to numbers
+            if (K!=data['mdsDat']['topic.names'].length){
+                cut_names=1;
+            }
+        } else{
+            cut_names=1;
+        }
+        if (cut_names==1) {
+            for (var i = 0; i < K; i++) {
+                topicNames[i] = i+1;
+            }
+        }
+        else{
+            for (var i = 0; i < K; i++) {
+                topicNames[i] = data['mdsDat']['topic.names'][i];
+            }
+        }
+        // ----------- enough for THE ONE ------------
+        
+        // a (K x 5) matrix with columns x, y, topics, Freq, cluster (where x and y are locations for left panel)
+        mdsData = [];
+        for (var i = 0; i < K; i++) {
+            var obj = {};
+            for (var key in data['mdsDat']) {
+                obj[key] = data['mdsDat'][key][i];
+            }
+            mdsData.push(obj);
+        }
+
+        // a huge matrix with 3 columns: Term, Topic, Freq, where Freq is all non-zero probabilities of topics given terms
+        // for the terms that appear in the barcharts for this data
+        mdsData3 = [];
+        for (var i = 0; i < data['token.table'].Term.length; i++) {
+            var obj = {};
+            for (var key in data['token.table']) {
+                obj[key] = data['token.table'][key][i];
+            }
+            mdsData3.push(obj);
+        }
+
+        // large data for the widths of bars in bar-charts. 6 columns: Term, logprob, loglift, Freq, Total, Category
+        // Contains all possible terms for topics in (1, 2, ..., k) and lambda in the user-supplied grid of lambda values
+        // which defaults to (0, 0.01, 0.02, ..., 0.99, 1).
+        lamData = [];
+        for (var i = 0; i < data['tinfo'].Term.length; i++) {
+            var obj = {};
+            for (var key in data['tinfo']) {
+                obj[key] = data['tinfo'][key][i];
+            }
+            lamData.push(obj);
+        }
+        var dat3 = lamData.slice(0, R);
+
+        // Create the topic input & lambda slider forms. Inspired from:
+        // http://bl.ocks.org/d3noob/10632804
+        // http://bl.ocks.org/d3noob/10633704
+        init_forms(topicID, lambdaID, visID);
+
+        // When the value of lambda changes, update the visualization
+        console.log('lambda_select', lambda_select);
+        d3.select(lambda_select)
+            .on("mouseup", function() {
+                console.log('lambda_select mouseup');
+                // store the previous lambda value
+                lambda.old = lambda.current;
+                lambda.current = document.getElementById(lambdaID).value;
+                vis_state.lambda = +this.value;
+                // adjust the text on the range slider
+                d3.select(lambda_select).property("value", vis_state.lambda);
+                d3.select(lambda_select + "-value").text(vis_state.lambda);
+                // transition the order of the bars
+                var increased = lambda.old < vis_state.lambda;
+                if (vis_state.topic > 0) reorder_bars(increased);
+                // store the current lambda value
+                state_save(true);
+                document.getElementById(lambdaID).value = vis_state.lambda;
+            });
+
+        d3.select("#" + topicUp)
+            .on("click", function() {
+                // remove term selection if it exists (from a saved URL)
+                var termElem = document.getElementById(termID + vis_state.term);
+                if (termElem !== undefined) term_off(termElem);
+                vis_state.term = "";
+                var value_old = document.getElementById(topicID).value;
+                var value_new = Math.min(K, +value_old + 1).toFixed(0);
+                // increment the value in the input box
+                document.getElementById(topicID).value = value_new;
+                topic_off(document.getElementById(topicID + value_old));
+                topic_on(document.getElementById(topicID + value_new));
+                vis_state.topic = value_new;
+                state_save(true);
+            });
+
+        d3.select("#" + topicDown)
+            .on("click", function() {
+                // remove term selection if it exists (from a saved URL)
+                var termElem = document.getElementById(termID + vis_state.term);
+                if (termElem !== undefined) term_off(termElem);
+                vis_state.term = "";
+                var value_old = document.getElementById(topicID).value;
+                var value_new = Math.max(0, +value_old - 1).toFixed(0);
+                // increment the value in the input box
+                document.getElementById(topicID).value = value_new;
+                topic_off(document.getElementById(topicID + value_old));
+                topic_on(document.getElementById(topicID + value_new));
+                vis_state.topic = value_new;
+                state_save(true);
+            });
+
+        d3.select("#" + topicID)
+            .on("keyup", function() {
+                // remove term selection if it exists (from a saved URL)
+                var termElem = document.getElementById(termID + vis_state.term);
+                if (termElem !== undefined) term_off(termElem);
+                vis_state.term = "";
+                topic_off(document.getElementById(topicID + vis_state.topic));
+                var value_new = document.getElementById(topicID).value;
+                if (!isNaN(value_new) && value_new > 0) {
+                    value_new = Math.min(K, Math.max(1, value_new));
+                    topic_on(document.getElementById(topicID + value_new));
+                    vis_state.topic = value_new;
+                    state_save(true);
+                    document.getElementById(topicID).value = vis_state.topic;
+                }
+            });
+
+        d3.select("#" + topicClear)
+            .on("click", function() {
+                state_reset();
+                state_save(true);
+            });
+
+        // create linear scaling to pixels (and add some padding on outer region of scatterplot)
+        var xrange = d3.extent(mdsData, function(d) {
+            return d.x;
+        }); //d3.extent returns min and max of an array
+        var xdiff = xrange[1] - xrange[0],
+            xpad = 0.05;
+        var yrange = d3.extent(mdsData, function(d) {
+            return d.y;
+        });
+        var ydiff = yrange[1] - yrange[0],
+            ypad = 0.05;
+
+        if (xdiff > ydiff) {
+            var xScale = d3.scale.linear()
+                    .range([0, mdswidth])
+                    .domain([xrange[0] - xpad * xdiff, xrange[1] + xpad * xdiff]);
+
+            var yScale = d3.scale.linear()
+                    .range([mdsheight, 0])
+                    .domain([yrange[0] - 0.5*(xdiff - ydiff) - ypad*xdiff, yrange[1] + 0.5*(xdiff - ydiff) + ypad*xdiff]);
+        } else {
+            var xScale = d3.scale.linear()
+                    .range([0, mdswidth])
+                    .domain([xrange[0] - 0.5*(ydiff - xdiff) - xpad*ydiff, xrange[1] + 0.5*(ydiff - xdiff) + xpad*ydiff]);
+
+            var yScale = d3.scale.linear()
+                    .range([mdsheight, 0])
+                    .domain([yrange[0] - ypad * ydiff, yrange[1] + ypad * ydiff]);
+        }
+
+        // Create new svg element (that will contain everything):
+        var svg = d3.select(to_select).append("svg")
+                .attr("width", mdswidth + barwidth + margin.left + termwidth + margin.right)
+                .attr("height", mdsheight + 2 * margin.top + margin.bottom + 2 * rMax);
+
+        // Create a group for the mds plot
+        var mdsplot = svg.append("g")
+                .attr("id", leftPanelID)
+                .attr("class", "points")
+                .attr("transform", "translate(" + margin.left + "," + 2 * margin.top + ")");
+
+        // Clicking on the mdsplot should clear the selection
+        mdsplot
+            .append("rect")
+            .attr("x", 0)
+            .attr("y", 0)
+            .attr("height", mdsheight)
+            .attr("width", mdswidth)
+            .style("fill", color1)
+            .attr("opacity", 0)
+            .on("click", function() {
+                state_reset();
+                state_save(true);
+            });
+
+        mdsplot.append("line") // draw x-axis
+            .attr("x1", 0)
+            .attr("x2", mdswidth)
+            .attr("y1", mdsheight / 2)
+            .attr("y2", mdsheight / 2)
+            .attr("stroke", "gray")
+            .attr("opacity", 0.3);
+        mdsplot.append("text") // label x-axis
+            .attr("x", 0)
+            .attr("y", mdsheight/2 - 5)
+            .text(data['plot.opts'].xlab)
+            .attr("fill", "gray");
+
+        mdsplot.append("line") // draw y-axis
+            .attr("x1", mdswidth / 2)
+            .attr("x2", mdswidth / 2)
+            .attr("y1", 0)
+            .attr("y2", mdsheight)
+            .attr("stroke", "gray")
+            .attr("opacity", 0.3);
+        mdsplot.append("text") // label y-axis
+            .attr("x", mdswidth/2 + 5)
+            .attr("y", 7)
+            .text(data['plot.opts'].ylab)
+            .attr("fill", "gray");
+
+        // new definitions based on fixing the sum of the areas of the default topic circles:
+        var newSmall = Math.sqrt(0.02*mdsarea*circle_prop/Math.PI);
+        var newMedium = Math.sqrt(0.05*mdsarea*circle_prop/Math.PI);
+        var newLarge = Math.sqrt(0.10*mdsarea*circle_prop/Math.PI);
+        var cx = 10 + newLarge,
+            cx2 = cx + 1.5 * newLarge;
+
+        // circle guide inspired from
+        // http://www.nytimes.com/interactive/2012/02/13/us/politics/2013-budget-proposal-graphic.html?_r=0
+        var circleGuide = function(rSize, size) {
+            d3.select("#" + leftPanelID).append("circle")
+                .attr('class', "circleGuide" + size)
+                .attr('r', rSize)
+                .attr('cx', cx)
+                .attr('cy', mdsheight + rSize)
+                .style('fill', 'none')
+                .style('stroke-dasharray', '2 2')
+                .style('stroke', '#999');
+            d3.select("#" + leftPanelID).append("line")
+                .attr('class', "lineGuide" + size)
+                .attr("x1", cx)
+                .attr("x2", cx2)
+                .attr("y1", mdsheight + 2 * rSize)
+                .attr("y2", mdsheight + 2 * rSize)
+                .style("stroke", "gray")
+                .style("opacity", 0.3);
+        };
+
+        circleGuide(newSmall, "Small");
+        circleGuide(newMedium, "Medium");
+        circleGuide(newLarge, "Large");
+
+        var defaultLabelSmall = "2%";
+        var defaultLabelMedium = "5%";
+        var defaultLabelLarge = "10%";
+
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", 10)
+            .attr("y", mdsheight - 10)
+            .attr('class', "circleGuideTitle")
+            .style("text-anchor", "left")
+            .style("fontWeight", "bold")
+            .text("Marginal topic distribtion");
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", cx2 + 10)
+            .attr("y", mdsheight + 2 * newSmall)
+            .attr('class', "circleGuideLabelSmall")
+            .style("text-anchor", "start")
+            .text(defaultLabelSmall);
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", cx2 + 10)
+            .attr("y", mdsheight + 2 * newMedium)
+            .attr('class', "circleGuideLabelMedium")
+            .style("text-anchor", "start")
+            .text(defaultLabelMedium);
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", cx2 + 10)
+            .attr("y", mdsheight + 2 * newLarge)
+            .attr('class', "circleGuideLabelLarge")
+            .style("text-anchor", "start")
+            .text(defaultLabelLarge);
+
+        // bind mdsData to the points in the left panel:
+        var points = mdsplot.selectAll("points")
+                .data(mdsData)
+                .enter();
+
+        // text to indicate topic
+        // ------------------ THE ONE -------------------
+        points.append("text")
+            .attr("class", "txt")
+            .attr("x", function(d) {
+                return (xScale(+d.x));
+            })
+            .attr("y", function(d) {
+                return (yScale(+d.y) + 4);
+            })
+            //.attr("stroke", "black")
+            .attr("opacity", 1)
+            .style("text-anchor", "middle")
+            .style("font-size", "12px")
+            .style("fontWeight", 100)
+            .text(function(d) {
+                return topicNames[d.topics-1]; // only one that changed from d.topics to topicNames[d.topics-1]
+            });
+        // ------------------ THE ONE finished-------------------
+
+        // draw circles
+        points.append("circle")
+            .attr("class", "dot")
+            .style("opacity", 0.2)
+            .style("fill", color1)
+            .attr("r", function(d) {
+                //return (rScaleMargin(+d.Freq));
+                return (Math.sqrt((d.Freq/100)*mdswidth*mdsheight*circle_prop/Math.PI));
+            })
+            .attr("cx", function(d) {
+                return (xScale(+d.x));
+            })
+            .attr("cy", function(d) {
+                return (yScale(+d.y));
+            })
+            .attr("stroke", "black")
+            .attr("id", function(d) {
+                return (topicID + d.topics);
+                
+            })
+            .on("mouseover", function(d) {
+                var old_topic = topicID + vis_state.topic;
+                if (vis_state.topic > 0 && old_topic != this.id) {
+                    topic_off(document.getElementById(old_topic));
+                }
+                topic_on(this);
+            })
+            .on("click", function(d) {
+                // prevent click event defined on the div container from firing
+                // http://bl.ocks.org/jasondavies/3186840
+                d3.event.stopPropagation();
+                var old_topic = topicID + vis_state.topic;
+                if (vis_state.topic > 0 && old_topic != this.id) {
+                    topic_off(document.getElementById(old_topic));
+                }
+                // make sure topic input box value and fragment reflects clicked selection
+                document.getElementById(topicID).value = vis_state.topic = d.topics;
+                state_save(true);
+                topic_on(this);
+            })
+            .on("mouseout", function(d) {
+                if (vis_state.topic != d.topics) topic_off(this);
+                if (vis_state.topic > 0) topic_on(document.getElementById(topicID + vis_state.topic));
+            });
+
+        svg.append("text")
+            .text("Intertopic Distance Map (via multidimensional scaling)")
+            .attr("x", mdswidth/2 + margin.left)
+            .attr("y", 30)
+            .style("font-size", "16px")
+            .style("text-anchor", "middle");
+
+        // establish layout and vars for bar chart
+        var barDefault2 = dat3.filter(function(d) {
+            return d.Category == "Default";
+        });
+
+        var y = d3.scale.ordinal()
+                .domain(barDefault2.map(function(d) {
+                    return d.Term;
+                }))
+                .rangeRoundBands([0, barheight], 0.15);
+        var x = d3.scale.linear()
+                .domain([1, d3.max(barDefault2, function(d) {
+                    return d.Total;
+                })])
+                .range([0, barwidth])
+                .nice();
+        var yAxis = d3.svg.axis()
+                .scale(y);
+
+        // Add a group for the bar chart
+        var chart = svg.append("g")
+                .attr("transform", "translate(" + +(mdswidth + margin.left + termwidth) + "," + 2 * margin.top + ")")
+                .attr("id", barFreqsID);
+
+        // bar chart legend/guide:
+        var barguide = {"width": 100, "height": 15};
+        d3.select("#" + barFreqsID).append("rect")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10)
+            .attr("height", barguide.height)
+            .attr("width", barguide.width)
+            .style("fill", color1)
+            .attr("opacity", 0.4);
+        d3.select("#" + barFreqsID).append("text")
+            .attr("x", barguide.width + 5)
+            .attr("y", mdsheight + 10 + barguide.height/2)
+            .style("dominant-baseline", "middle")
+            .text("Overall term frequency");
+
+        d3.select("#" + barFreqsID).append("rect")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10 + barguide.height + 5)
+            .attr("height", barguide.height)
+            .attr("width", barguide.width/2)
+            .style("fill", color2)
+            .attr("opacity", 0.8);
+        d3.select("#" + barFreqsID).append("text")
+            .attr("x", barguide.width/2 + 5)
+            .attr("y", mdsheight + 10 + (3/2)*barguide.height + 5)
+            .style("dominant-baseline", "middle")
+            .text("Estimated term frequency within the selected topic");
+
+        // footnotes:
+        d3.select("#" + barFreqsID)
+            .append("a")
+            .attr("xlink:href", "http://vis.stanford.edu/files/2012-Termite-AVI.pdf")
+            .attr("target", "_blank")
+            .append("text")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10 + (6/2)*barguide.height + 5)
+            .style("dominant-baseline", "middle")
+            .text("1. saliency(term w) = frequency(w) * [sum_t p(t | w) * log(p(t | w)/p(t))] for topics t; ");
+        d3.select("#" + barFreqsID)
+            .append("a")
+            .attr("xlink:href", "http://nlp.stanford.edu/events/illvi2014/papers/sievert-illvi2014.pdf")
+            .attr("target", "_blank")
+            .append("text")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10 + (8/2)*barguide.height + 5)
+            .style("dominant-baseline", "middle")
+            .text("2. relevance(term w | topic t) = λ * p(w | t) + (1 - λ) * p(w | t)/p(w); ");
+
+        // Bind 'default' data to 'default' bar chart
+        var basebars = chart.selectAll(to_select + " .bar-totals")
+                .data(barDefault2)
+                .enter();
+
+        // Draw the gray background bars defining the overall frequency of each word
+        basebars
+            .append("rect")
+            .attr("class", "bar-totals")
+            .attr("x", 0)
+            .attr("y", function(d) {
+                return y(d.Term);
+            })
+            .attr("height", y.rangeBand())
+            .attr("width", function(d) {
+                return x(d.Total);
+            })
+            .style("fill", color1)
+            .attr("opacity", 0.4);
+
+        // Add word labels to the side of each bar
+        basebars
+            .append("text")
+            .attr("x", -5)
+            .attr("class", "terms")
+            .attr("y", function(d) {
+                return y(d.Term) + 12;
+            })
+            .attr("cursor", "pointer")
+            .attr("id", function(d) {
+                return (termID + d.Term);
+            })
+            .style("text-anchor", "end") // right align text - use 'middle' for center alignment
+            .text(function(d) {
+                return d.Term;
+            })
+            .on("mouseover", function() {
+                term_hover(this);
+            })
+        // .on("click", function(d) {
+        //     var old_term = termID + vis_state.term;
+        //     if (vis_state.term != "" && old_term != this.id) {
+        //         term_off(document.getElementById(old_term));
+        //     }
+        //     vis_state.term = d.Term;
+        //     state_save(true);
+        //     term_on(this);
+        //     debugger;
+        // })
+            .on("mouseout", function() {
+                vis_state.term = "";
+                term_off(this);
+                state_save(true);
+            });
+
+        var title = chart.append("text")
+                .attr("x", barwidth/2)
+                .attr("y", -30)
+                .attr("class", "bubble-tool") //  set class so we can remove it when highlight_off is called
+                .style("text-anchor", "middle")
+                .style("font-size", "16px")
+                .text("Top-" + R + " Most Salient Terms");
+
+        title.append("tspan")
+            .attr("baseline-shift", "super")
+            .attr("font-size", "12px")
+            .text("(1)");
+
+        // barchart axis adapted from http://bl.ocks.org/mbostock/1166403
+        var xAxis = d3.svg.axis().scale(x)
+                .orient("top")
+                .tickSize(-barheight)
+                .tickSubdivide(true)
+                .ticks(6);
+
+        chart.attr("class", "xaxis")
+            .call(xAxis);
+
+        // dynamically create the topic and lambda input forms at the top of the page:
+        function init_forms(topicID, lambdaID, visID) {
+
+            // create container div for topic and lambda input:
+            var inputDiv = document.createElement("div");
+            inputDiv.setAttribute("id", topID);
+            inputDiv.setAttribute("style", "width: 1210px"); // to match the width of the main svg element
+            document.getElementById(visID).appendChild(inputDiv);
+
+            // topic input container:
+            var topicDiv = document.createElement("div");
+            topicDiv.setAttribute("style", "padding: 5px; background-color: #e8e8e8; display: inline-block; width: " + mdswidth + "px; height: 50px; float: left");
+            inputDiv.appendChild(topicDiv);
+
+            var topicLabel = document.createElement("label");
+            topicLabel.setAttribute("for", topicID);
+            topicLabel.setAttribute("style", "font-family: sans-serif; font-size: 14px");
+            topicLabel.innerHTML = "Selected Topic: <span id='" + topicID + "-value'></span>";
+            topicDiv.appendChild(topicLabel);
+
+            var topicInput = document.createElement("input");
+            topicInput.setAttribute("style", "width: 50px");
+            topicInput.type = "text";
+            topicInput.min = "0";
+            topicInput.max = K; // assumes the data has already been read in
+            topicInput.step = "1";
+            topicInput.value = "0"; // a value of 0 indicates no topic is selected
+            topicInput.id = topicID;
+            topicDiv.appendChild(topicInput);
+
+            var previous = document.createElement("button");
+            previous.setAttribute("id", topicDown);
+            previous.setAttribute("style", "margin-left: 5px");
+            previous.innerHTML = "Previous Topic";
+            topicDiv.appendChild(previous);
+
+            var next = document.createElement("button");
+            next.setAttribute("id", topicUp);
+            next.setAttribute("style", "margin-left: 5px");
+            next.innerHTML = "Next Topic";
+            topicDiv.appendChild(next);
+
+            var clear = document.createElement("button");
+            clear.setAttribute("id", topicClear);
+            clear.setAttribute("style", "margin-left: 5px");
+            clear.innerHTML = "Clear Topic";
+            topicDiv.appendChild(clear);
+
+            // lambda inputs
+            //var lambdaDivLeft = 8 + mdswidth + margin.left + termwidth;
+            var lambdaDivWidth = barwidth;
+            var lambdaDiv = document.createElement("div");
+            lambdaDiv.setAttribute("id", lambdaInputID);
+            lambdaDiv.setAttribute("style", "padding: 5px; background-color: #e8e8e8; display: inline-block; height: 50px; width: " + lambdaDivWidth + "px; float: right; margin-right: 30px");
+            inputDiv.appendChild(lambdaDiv);
+
+            var lambdaZero = document.createElement("div");
+            lambdaZero.setAttribute("style", "padding: 5px; height: 20px; width: 220px; font-family: sans-serif; float: left");
+            lambdaZero.setAttribute("id", lambdaZeroID);
+            lambdaDiv.appendChild(lambdaZero);
+            var xx = d3.select("#" + lambdaZeroID)
+                    .append("text")
+                    .attr("x", 0)
+                    .attr("y", 0)
+                    .style("font-size", "14px")
+                    .text("Slide to adjust relevance metric:");
+            var yy = d3.select("#" + lambdaZeroID)
+                    .append("text")
+                    .attr("x", 125)
+                    .attr("y", -5)
+                    .style("font-size", "10px")
+                    .style("position", "absolute")
+                    .text("(2)");
+
+            var sliderDiv = document.createElement("div");
+            sliderDiv.setAttribute("id", sliderDivID);
+            sliderDiv.setAttribute("style", "padding: 5px; height: 40px; width: 250px; float: right; margin-top: -5px; margin-right: 10px");
+            lambdaDiv.appendChild(sliderDiv);
+
+            var lambdaInput = document.createElement("input");
+            lambdaInput.setAttribute("style", "width: 250px; margin-left: 0px; margin-right: 0px");
+            lambdaInput.type = "range";
+            lambdaInput.min = 0;
+            lambdaInput.max = 1;
+            lambdaInput.step = data['lambda.step'];
+            lambdaInput.value = vis_state.lambda;
+            lambdaInput.id = lambdaID;
+            lambdaInput.setAttribute("list", "ticks"); // to enable automatic ticks (with no labels, see below)
+            sliderDiv.appendChild(lambdaInput);
+
+            var lambdaLabel = document.createElement("label");
+            lambdaLabel.setAttribute("id", lambdaLabelID);
+            lambdaLabel.setAttribute("for", lambdaID);
+            lambdaLabel.setAttribute("style", "height: 20px; width: 60px; font-family: sans-serif; font-size: 14px; margin-left: 80px");
+            lambdaLabel.innerHTML = "&#955 = <span id='" + lambdaID + "-value'>" + vis_state.lambda + "</span>";
+            lambdaDiv.appendChild(lambdaLabel);
+
+            // Create the svg to contain the slider scale:
+            var scaleContainer = d3.select("#" + sliderDivID).append("svg")
+                    .attr("width", 250)
+                    .attr("height", 25);
+
+            var sliderScale = d3.scale.linear()
+                    .domain([0, 1])
+                    .range([7.5, 242.5])  // trimmed by 7.5px on each side to match the input type=range slider:
+                    .nice();
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var sliderAxis = d3.svg.axis()
+                    .scale(sliderScale)
+                    .orient("bottom")
+                    .tickSize(10)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // group to contain the elements of the slider axis:
+            var sliderAxisGroup = scaleContainer.append("g")
+                    .attr("class", "slideraxis")
+                    .attr("margin-top", "-10px")
+                    .call(sliderAxis);
+
+            // Another strategy for tick marks on the slider; simpler, but not labels
+            // var sliderTicks = document.createElement("datalist");
+            // sliderTicks.setAttribute("id", "ticks");
+            // for (var tick = 0; tick <= 10; tick++) {
+            //     var tickOption = document.createElement("option");
+            //     //tickOption.value = tick/10;
+            //     tickOption.innerHTML = tick/10;
+            //     sliderTicks.appendChild(tickOption);
+            // }
+            // append the forms to the containers
+            //lambdaDiv.appendChild(sliderTicks);
+
+        }
+
+        // function to re-order the bars (gray and red), and terms:
+        function reorder_bars(increase) {
+            // grab the bar-chart data for this topic only:
+            var dat2 = lamData.filter(function(d) {
+                //return d.Category == "Topic" + Math.min(K, Math.max(0, vis_state.topic)) // fails for negative topic numbers...
+                return d.Category == "Topic" + vis_state.topic;
+            });
+            // define relevance:
+            for (var i = 0; i < dat2.length; i++) {
+                dat2[i].relevance = vis_state.lambda * dat2[i].logprob +
+                    (1 - vis_state.lambda) * dat2[i].loglift;
+            }
+
+            // sort by relevance:
+            dat2.sort(fancysort("relevance"));
+
+            // truncate to the top R tokens:
+            var dat3 = dat2.slice(0, R);
+
+            var y = d3.scale.ordinal()
+                    .domain(dat3.map(function(d) {
+                        return d.Term;
+                    }))
+                    .rangeRoundBands([0, barheight], 0.15);
+            var x = d3.scale.linear()
+                    .domain([1, d3.max(dat3, function(d) {
+                        return d.Total;
+                    })])
+                    .range([0, barwidth])
+                    .nice();
+
+            // Change Total Frequency bars
+            var graybars = d3.select("#" + barFreqsID)
+                    .selectAll(to_select + " .bar-totals")
+                    .data(dat3, function(d) {
+                        return d.Term;
+                    });
+
+            // Change word labels
+            var labels = d3.select("#" + barFreqsID)
+                    .selectAll(to_select + " .terms")
+                    .data(dat3, function(d) {
+                        return d.Term;
+                    });
+
+            // Create red bars (drawn over the gray ones) to signify the frequency under the selected topic
+            var redbars = d3.select("#" + barFreqsID)
+                    .selectAll(to_select + " .overlay")
+                    .data(dat3, function(d) {
+                        return d.Term;
+                    });
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var xAxis = d3.svg.axis().scale(x)
+                    .orient("top")
+                    .tickSize(-barheight)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // New axis definition:
+            var newaxis = d3.selectAll(to_select + " .xaxis");
+
+            // define the new elements to enter:
+            var graybarsEnter = graybars.enter().append("rect")
+                    .attr("class", "bar-totals")
+                    .attr("x", 0)
+                    .attr("y", function(d) {
+                        return y(d.Term) + barheight + margin.bottom + 2 * rMax;
+                    })
+                    .attr("height", y.rangeBand())
+                    .style("fill", color1)
+                    .attr("opacity", 0.4);
+
+            var labelsEnter = labels.enter()
+                    .append("text")
+                    .attr("x", -5)
+                    .attr("class", "terms")
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12 + barheight + margin.bottom + 2 * rMax;
+                    })
+                    .attr("cursor", "pointer")
+                    .style("text-anchor", "end")
+                    .attr("id", function(d) {
+                        return (termID + d.Term);
+                    })
+                    .text(function(d) {
+                        return d.Term;
+                    })
+                    .on("mouseover", function() {
+                        term_hover(this);
+                    })
+            // .on("click", function(d) {
+            //     var old_term = termID + vis_state.term;
+            //     if (vis_state.term != "" && old_term != this.id) {
+            //     term_off(document.getElementById(old_term));
+            //     }
+            //     vis_state.term = d.Term;
+            //     state_save(true);
+            //     term_on(this);
+            // })
+                    .on("mouseout", function() {
+                        vis_state.term = "";
+                        term_off(this);
+                        state_save(true);
+                    });
+
+            var redbarsEnter = redbars.enter().append("rect")
+                    .attr("class", "overlay")
+                    .attr("x", 0)
+                    .attr("y", function(d) {
+                        return y(d.Term) + barheight + margin.bottom + 2 * rMax;
+                    })
+                    .attr("height", y.rangeBand())
+                    .style("fill", color2)
+                    .attr("opacity", 0.8);
+
+
+            if (increase) {
+                graybarsEnter
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    })
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+                labelsEnter
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbarsEnter
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    })
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+
+                graybars.transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+                labels.transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbars.transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+
+                // Transition exiting rectangles to the bottom of the barchart:
+                graybars.exit()
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18;
+                    })
+                    .remove();
+                labels.exit()
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 18 + i * 18;
+                    })
+                    .remove();
+                redbars.exit()
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18;
+                    })
+                    .remove();
+                // https://github.com/mbostock/d3/wiki/Transitions#wiki-d3_ease
+                newaxis.transition().duration(duration)
+                    .call(xAxis)
+                    .transition().duration(duration);
+            } else {
+                graybarsEnter
+                    .attr("width", 100) // FIXME by looking up old width of these bars
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    });
+                labelsEnter
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbarsEnter
+                    .attr("width", 50) // FIXME by looking up old width of these bars
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    });
+
+                graybars.transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    });
+                labels.transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbars.transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    });
+
+                // Transition exiting rectangles to the bottom of the barchart:
+                graybars.exit()
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18 + 2 * rMax;
+                    })
+                    .remove();
+                labels.exit()
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 18 + i * 18 + 2 * rMax;
+                    })
+                    .remove();
+                redbars.exit()
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18 + 2 * rMax;
+                    })
+                    .remove();
+
+                // https://github.com/mbostock/d3/wiki/Transitions#wiki-d3_ease
+                newaxis.transition().duration(duration)
+                    .transition().duration(duration)
+                    .call(xAxis);
+            }
+        }
+
+        //////////////////////////////////////////////////////////////////////////////
+
+        // function to update bar chart when a topic is selected
+        // the circle argument should be the appropriate circle element
+        function topic_on(circle) {
+            if (circle == null) return null;
+
+            // grab data bound to this element
+            var d = circle.__data__;
+            var Freq = Math.round(d.Freq * 10) / 10,
+                topics = d.topics;
+
+            // change opacity and fill of the selected circle
+            circle.style.opacity = highlight_opacity;
+            circle.style.fill = color2;
+
+            // Remove 'old' bar chart title
+            var text = d3.select(to_select + " .bubble-tool");
+            text.remove();
+
+            // append text with info relevant to topic of interest
+            d3.select("#" + barFreqsID)
+                .append("text")
+                .attr("x", barwidth/2)
+                .attr("y", -30)
+                .attr("class", "bubble-tool") //  set class so we can remove it when highlight_off is called
+                .style("text-anchor", "middle")
+                .style("font-size", "16px")
+                .text("Top-" + R + " Most Relevant Terms for Topic " + topics + " (" + Freq + "% of tokens)");
+
+            // grab the bar-chart data for this topic only:
+            var dat2 = lamData.filter(function(d) {
+                return d.Category == "Topic" + topics;
+            });
+
+            // define relevance:
+            for (var i = 0; i < dat2.length; i++) {
+                dat2[i].relevance = lambda.current * dat2[i].logprob +
+                    (1 - lambda.current) * dat2[i].loglift;
+            }
+
+            // sort by relevance:
+            dat2.sort(fancysort("relevance"));
+
+            // truncate to the top R tokens:
+            var dat3 = dat2.slice(0, R);
+
+            // scale the bars to the top R terms:
+            var y = d3.scale.ordinal()
+                    .domain(dat3.map(function(d) {
+                        return d.Term;
+                    }))
+                    .rangeRoundBands([0, barheight], 0.15);
+            var x = d3.scale.linear()
+                    .domain([1, d3.max(dat3, function(d) {
+                        return d.Total;
+                    })])
+                    .range([0, barwidth])
+                    .nice();
+
+            // remove the red bars if there are any:
+            d3.selectAll(to_select + " .overlay").remove();
+
+            // Change Total Frequency bars
+            d3.selectAll(to_select + " .bar-totals")
+                .data(dat3)
+                .attr("x", 0)
+                .attr("y", function(d) {
+                    return y(d.Term);
+                })
+                .attr("height", y.rangeBand())
+                .attr("width", function(d) {
+                    return x(d.Total);
+                })
+                .style("fill", color1)
+                .attr("opacity", 0.4);
+
+            // Change word labels
+            d3.selectAll(to_select + " .terms")
+                .data(dat3)
+                .attr("x", -5)
+                .attr("y", function(d) {
+                    return y(d.Term) + 12;
+                })
+                .attr("id", function(d) {
+                    return (termID + d.Term);
+                })
+                .style("text-anchor", "end") // right align text - use 'middle' for center alignment
+                .text(function(d) {
+                    return d.Term;
+                });
+
+            // Create red bars (drawn over the gray ones) to signify the frequency under the selected topic
+            d3.select("#" + barFreqsID).selectAll(to_select + " .overlay")
+                .data(dat3)
+                .enter()
+                .append("rect")
+                .attr("class", "overlay")
+                .attr("x", 0)
+                .attr("y", function(d) {
+                    return y(d.Term);
+                })
+                .attr("height", y.rangeBand())
+                .attr("width", function(d) {
+                    return x(d.Freq);
+                })
+                .style("fill", color2)
+                .attr("opacity", 0.8);
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var xAxis = d3.svg.axis().scale(x)
+                    .orient("top")
+                    .tickSize(-barheight)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // redraw x-axis
+            d3.selectAll(to_select + " .xaxis")
+            //.attr("class", "xaxis")
+                .call(xAxis);
+        }
+
+
+        function topic_off(circle) {
+            if (circle == null) return circle;
+            // go back to original opacity/fill
+            circle.style.opacity = base_opacity;
+            circle.style.fill = color1;
+
+            var title = d3.selectAll(to_select + " .bubble-tool")
+                    .text("Top-" + R + " Most Salient Terms");
+            title.append("tspan")
+                .attr("baseline-shift", "super")
+                .attr("font-size", 12)
+                .text(1);
+
+            // remove the red bars
+            d3.selectAll(to_select + " .overlay").remove();
+
+            // go back to 'default' bar chart
+            var dat2 = lamData.filter(function(d) {
+                return d.Category == "Default";
+            });
+
+            var y = d3.scale.ordinal()
+                    .domain(dat2.map(function(d) {
+                        return d.Term;
+                    }))
+                    .rangeRoundBands([0, barheight], 0.15);
+            var x = d3.scale.linear()
+                    .domain([1, d3.max(dat2, function(d) {
+                        return d.Total;
+                    })])
+                    .range([0, barwidth])
+                    .nice();
+
+            // Change Total Frequency bars
+            d3.selectAll(to_select + " .bar-totals")
+                .data(dat2)
+                .attr("x", 0)
+                .attr("y", function(d) {
+                    return y(d.Term);
+                })
+                .attr("height", y.rangeBand())
+                .attr("width", function(d) {
+                    return x(d.Total);
+                })
+                .style("fill", color1)
+                .attr("opacity", 0.4);
+
+            //Change word labels
+            d3.selectAll(to_select + " .terms")
+                .data(dat2)
+                .attr("x", -5)
+                .attr("y", function(d) {
+                    return y(d.Term) + 12;
+                })
+                .style("text-anchor", "end") // right align text - use 'middle' for center alignment
+                .text(function(d) {
+                    return d.Term;
+                });
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var xAxis = d3.svg.axis().scale(x)
+                    .orient("top")
+                    .tickSize(-barheight)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // redraw x-axis
+            d3.selectAll(to_select + " .xaxis")
+                .attr("class", "xaxis")
+                .call(xAxis);
+        }
+
+        // event definition for mousing over a term
+        function term_hover(term) {
+            var old_term = termID + vis_state.term;
+            if (vis_state.term != "" && old_term != term.id) {
+                term_off(document.getElementById(old_term));
+            }
+            vis_state.term = term.innerHTML;
+            term_on(term);
+            state_save(true);
+        }
+        // updates vis when a term is selected via click or hover
+        function term_on(term) {
+            if (term == null) return null;
+            term.style["fontWeight"] = "bold";
+            var d = term.__data__;
+            var Term = d.Term;
+            var dat2 = mdsData3.filter(function(d2) {
+                return d2.Term == Term;
+            });
+
+            var k = dat2.length; // number of topics for this token with non-zero frequency
+
+            var radius = [];
+            for (var i = 0; i < K; ++i) {
+                radius[i] = 0;
+            }
+            for (i = 0; i < k; i++) {
+                radius[dat2[i].Topic - 1] = dat2[i].Freq;
+            }
+
+            var size = [];
+            for (var i = 0; i < K; ++i) {
+                size[i] = 0;
+            }
+            for (i = 0; i < k; i++) {
+                // If we want to also re-size the topic number labels, do it here
+                // 11 is the default, so leaving this as 11 won't change anything.
+                size[dat2[i].Topic - 1] = 11;
+            }
+
+            var rScaleCond = d3.scale.sqrt()
+                    .domain([0, 1]).range([0, rMax]);
+
+            // Change size of bubbles according to the word's distribution over topics
+            d3.selectAll(to_select + " .dot")
+                .data(radius)
+                .transition()
+                .attr("r", function(d) {
+                    //return (rScaleCond(d));
+                    return (Math.sqrt(d*mdswidth*mdsheight*word_prop/Math.PI));
+                });
+
+            // re-bind mdsData so we can handle multiple selection
+            d3.selectAll(to_select + " .dot")
+                .data(mdsData);
+
+            // Change sizes of topic numbers:
+            d3.selectAll(to_select + " .txt")
+                .data(size)
+                .transition()
+                .style("font-size", function(d) {
+                    return +d;
+                });
+
+            // Alter the guide
+            d3.select(to_select + " .circleGuideTitle")
+                .text("Conditional topic distribution given term = '" + term.innerHTML + "'");
+        }
+
+        function term_off(term) {
+            if (term == null) return null;
+            term.style["fontWeight"] = "normal";
+
+            d3.selectAll(to_select + " .dot")
+                .data(mdsData)
+                .transition()
+                .attr("r", function(d) {
+                    //return (rScaleMargin(+d.Freq));
+                    return (Math.sqrt((d.Freq/100)*mdswidth*mdsheight*circle_prop/Math.PI));
+                });
+
+            // Change sizes of topic numbers:
+            d3.selectAll(to_select + " .txt")
+                .transition()
+                .style("font-size", "12px");
+
+            // Go back to the default guide
+            d3.select(to_select + " .circleGuideTitle")
+                .text("Marginal topic distribution");
+            d3.select(to_select + " .circleGuideLabelLarge")
+                .text(defaultLabelLarge);
+            d3.select(to_select + " .circleGuideLabelSmall")
+                .attr("y", mdsheight + 2 * newSmall)
+                .text(defaultLabelSmall);
+            d3.select(to_select + " .circleGuideSmall")
+                .attr("r", newSmall)
+                .attr("cy", mdsheight + newSmall);
+            d3.select(to_select + " .lineGuideSmall")
+                .attr("y1", mdsheight + 2 * newSmall)
+                .attr("y2", mdsheight + 2 * newSmall);
+        }
+
+
+        // serialize the visualization state using fragment identifiers -- http://en.wikipedia.org/wiki/Fragment_identifier
+        // location.hash holds the address information
+
+        var params = location.hash.split("&");
+        if (params.length > 1) {
+            vis_state.topic = params[0].split("=")[1];
+            vis_state.lambda = params[1].split("=")[1];
+            vis_state.term = params[2].split("=")[1];
+
+            // Idea: write a function to parse the URL string
+            // only accept values in [0,1] for lambda, {0, 1, ..., K} for topics (any string is OK for term)
+            // Allow for subsets of the three to be entered:
+            // (1) topic only (lambda = 1 term = "")
+            // (2) lambda only (topic = 0 term = "") visually the same but upon hovering a topic, the effect of lambda will be seen
+            // (3) term only (topic = 0 lambda = 1) only fires when the term is among the R most salient
+            // (4) topic + lambda (term = "")
+            // (5) topic + term (lambda = 1)
+            // (6) lambda + term (topic = 0) visually lambda doesn't make a difference unless a topic is hovered
+            // (7) topic + lambda + term
+
+            // Short-term: assume format of "#topic=k&lambda=l&term=s" where k, l, and s are strings (b/c they're from a URL)
+
+            // Force k (topic identifier) to be an integer between 0 and K:
+            vis_state.topic = Math.round(Math.min(K, Math.max(0, vis_state.topic)));
+
+            // Force l (lambda identifier) to be in [0, 1]:
+            vis_state.lambda = Math.min(1, Math.max(0, vis_state.lambda));
+
+            // impose the value of lambda:
+            document.getElementById(lambdaID).value = vis_state.lambda;
+            document.getElementById(lambdaID + "-value").innerHTML = vis_state.lambda;
+
+            // select the topic and transition the order of the bars (if approporiate)
+            if (!isNaN(vis_state.topic)) {
+                document.getElementById(topicID).value = vis_state.topic;
+                if (vis_state.topic > 0) {
+                    topic_on(document.getElementById(topicID + vis_state.topic));
+                }
+                if (vis_state.lambda < 1 && vis_state.topic > 0) {
+                    reorder_bars(false);
+                }
+            }
+            lambda.current = vis_state.lambda;
+            var termElem = document.getElementById(termID + vis_state.term);
+            if (termElem !== undefined) term_on(termElem);
+        }
+
+        function state_url() {
+            return location.origin + location.pathname + "#topic=" + vis_state.topic +
+                "&lambda=" + vis_state.lambda + "&term=" + vis_state.term;
+        }
+
+        function state_save(replace) {
+            if (replace)
+                history.replaceState(vis_state, "Query", state_url());
+            else
+                history.pushState(vis_state, "Query", state_url());
+        }
+
+        function state_reset() {
+            if (vis_state.topic > 0) {
+                topic_off(document.getElementById(topicID + vis_state.topic));
+            }
+            if (vis_state.term != "") {
+                term_off(document.getElementById(termID + vis_state.term));
+            }
+            vis_state.term = "";
+            document.getElementById(topicID).value = vis_state.topic = 0;
+            state_save(true);
+        }
+
+    }
+
+    if (typeof data_or_file_name === 'string')
+        d3.json(data_or_file_name, function(error, data) {visualize(data);});
+    else
+        visualize(data_or_file_name);
+
+    // var current_clicked = {
+    //     what: "nothing",
+    //     element: undefined
+    // },
+
+    //debugger;
+
+};
+
+var ldavis_el335921406368103716249969828584_data = {"mdsDat": {"Freq": [16.035227163547987, 16.023959033465406, 14.796681012020768, 10.467218886894424, 9.762885596248406, 9.101465916404678, 8.927787073904005, 8.601365519137042, 4.677936051548862, 1.6054737468284015], "cluster": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1], "topics": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "x": [172.70855712890625, 0.25879499316215515, 334.24407958984375, -165.14988708496094, 251.63523864746094, 7.0402302742004395, -72.7850570678711, -244.3319091796875, 80.26897430419922, -326.8729553222656], "y": [-166.48081970214844, -324.927734375, 3.0803050994873047, 177.5237579345703, 249.2078094482422, 336.162841796875, -69.58995056152344, -237.89268493652344, 80.72057342529297, 8.225196838378906], "topic.names": ["louise kitchen", "termination agreement", "hdd swap", "financial trading", "agreement mark", "financial gtc", "master swap", "capital trade", "local counsel", "commodity language"]}, "tinfo": {"Category": ["Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10"], "Freq": [4.0, 3.0, 3.0, 3.0, 3.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.4757092943776295, 2.1765283632257018, 2.1494781163225696, 1.6224007547252335, 1.327876686818273, 1.0417460273583135, 1.0393144113733879, 1.0463068491491134, 1.0538129924400381, 1.0388253516446277, 1.0271581582928955, 0.7610894683451022, 0.7347848476320391, 0.754596500408047, 0.7371766086134824, 0.7649934781641193, 0.7255281964506504, 0.7396933087825943, 0.7184437633471996, 0.7248067272448193, 0.7468258125237326, 0.7328867105827802, 0.7258096059680459, 0.7082007454866497, 0.7189889807409224, 0.7071336569490017, 0.7231964618608769, 0.7095933998686607, 0.48823741503749857, 0.4733491991640151, 0.4835032450526884, 3.632820623774695, 2.766562930628157, 2.4638056098252874, 2.1759281155832464, 1.9176135069291975, 1.8913955422093018, 1.8830439931950815, 1.3222302524841805, 1.3380062494602154, 1.0240978278139117, 0.9996741775884478, 1.0206131664790188, 1.0224065533217774, 1.001053987729801, 0.7520820975775346, 0.7286525798890261, 0.7362227541759129, 0.7439614096075123, 0.7147218325760458, 0.7489108522066427, 0.7281055398613111, 0.7286914765397936, 0.7512213479896048, 0.7379983653663363, 0.744924594165192, 0.7256186091075543, 0.7164442048059559, 0.7234422196355752, 0.7261868911274391, 0.7141687011060652, 0.7356920813778909, 0.7266546527131922, 0.7334259395909136, 2.372192955973164, 1.466388929468494, 1.496118780125007, 0.9744547990142911, 0.7046839790121867, 0.6934962519159588, 0.7130477264446899, 0.6810505117160073, 0.6958632849021074, 0.6658201603767451, 0.6914300893501714, 0.6886523544714516, 0.6688183287844853, 0.691947313121054, 0.6889552229996332, 0.6781470958770612, 0.6772801939536254, 0.6746223783280408, 0.6695484808343514, 0.6841111322430223, 0.6882317185816512, 0.7065442799151246, 0.6889237521558961, 0.4431178128499705, 0.43112386768055155, 0.4383065574677687, 0.44822770722242, 0.43457557351630166, 0.45419556592519467, 0.4378772444677759, 0.443700875659072, 0.4371064667187644, 0.9761636182539509, 0.738630316613561, 0.5393665505547409, 0.5342112591889904, 0.525685475526258, 0.5374950825219927, 0.531270721022276, 0.524576779175322, 0.5269923834746705, 0.5092380656745997, 0.5360708065637635, 0.341376606312011, 0.34155642514714274, 0.3289213462930149, 0.3421896475867878, 0.32731966691409586, 0.329741731693327, 0.32880546347524886, 0.3296690211568529, 0.32795860988553804, 0.32891767823731394, 0.32482675439754094, 0.3386251572440504, 0.3378343568800163, 0.33352668271497027, 0.32620458979296235, 0.33297741771805495, 0.3248286235320824, 0.32104621845795756, 0.32253922093004284, 0.3244360587493895, 0.32781873096766556, 0.33356811423853255, 0.33034248079553885, 0.3304605849212001, 0.32859000524670257, 0.3293382206555014, 0.33092809321764255, 0.33006063126461443, 0.3295574495907177, 0.8903821211916074, 0.8972315439177535, 0.7067565863076731, 0.7006447640712188, 0.6979086087078605, 0.5169046431064411, 0.4898790504101442, 0.4995413102578099, 0.49918564679148575, 0.4804312027142432, 0.5099081653939268, 0.4829450464986917, 0.4815717668044355, 0.49010445715467715, 0.32935638341191886, 0.3261866519450497, 0.3267560358972595, 0.3349157024161592, 0.3295745654542121, 0.31374299522449084, 0.31631293640101643, 0.3154276067656585, 0.3152661757530918, 0.31659207057130034, 0.31786105391638486, 0.3016543005303492, 0.3202782725537645, 0.3095600566297807, 0.31437236599726853, 0.30985484790560697, 0.31734802460314704, 0.3140038583848346, 0.31235341780852, 0.31282818877872987, 0.6680293108277185, 0.675790573718415, 0.6844061345115048, 0.4916033805281931, 0.4824149712331882, 0.4818126181241668, 0.4765167804117065, 0.4820490952865597, 0.4790970089590381, 0.4735130736556929, 0.46798853174221483, 0.4613625922962406, 0.30575976516085, 0.3107729729460377, 0.2972757337817825, 0.2845346635368864, 0.28542065148437606, 0.29925187570211437, 0.290690530783167, 0.2971510410676927, 0.28503526544459473, 0.29485166647619465, 0.28227217537642474, 0.2893339619443028, 0.2832278608039542, 0.28334246069273183, 0.2906832596367712, 0.27709830192094137, 0.28850875074019805, 0.28470854636223103, 0.29392941461237737, 0.29254366528996706, 0.29808511206444954, 0.29652650628718996, 0.29699433251455665, 0.29626007192769205, 0.3021812492350469, 0.294611718021077, 0.29510470161207863, 0.29594749286761446, 0.29204602286199716, 0.29208476895386815, 0.29317758193073795, 0.2921704048396011, 0.8502655139730481, 0.6677071759981471, 0.4809805176500098, 0.47413338396343574, 0.4958676246251089, 0.47839037769812803, 0.47467001281334964, 0.47838850959172924, 0.46036103088617375, 0.461613762108727, 0.4734851077187299, 0.4579610737824705, 0.45758213915706547, 0.46592490897020844, 0.47109896425019976, 0.4728423783471793, 0.4620911810464438, 0.4620674150705903, 0.4519173078424971, 0.4708709580336367, 0.45971068830622924, 0.456945300079442, 0.46035554150429003, 0.30000451883123275, 0.3043005039480403, 0.2925202419699576, 0.30443334618173695, 0.3002546876647678, 0.28832380332382956, 0.2872053508049673, 0.29645389569399316, 0.2934564205410921, 0.29951239032322785, 0.29698924526544473, 0.29672378342420463, 1.1937540573766061, 0.9991473590162899, 0.823349051193011, 0.6402206326192629, 0.6273389283834021, 0.6367118209147858, 0.45489391824324166, 0.44806507185283323, 0.2919064310374793, 0.28822313534468164, 0.2785121098591129, 0.28419836822861344, 0.2820252579362834, 0.2783474009067201, 0.2813269403614895, 0.27633879155283375, 0.2797784926319394, 0.27462300759734687, 0.27179280593711386, 0.2854416363914891, 0.2833206372781317, 0.27869712732105634, 0.28473594198140345, 0.2825500074439103, 0.27529856011542375, 0.27106825748381236, 0.27663894660326105, 0.2746865934756243, 0.28948840324042374, 0.2765622108063761, 0.28478447784720995, 0.2826357591948994, 0.28278043621082777, 0.28225476349832623, 0.2841529342959121, 0.2861187163007203, 0.28032421975498706, 0.27983477318597305, 0.27937913486913957, 0.47402447842108947, 0.4881329622768554, 0.2662450244408787, 0.26211995368355123, 0.2659919600139362, 0.26066576221296855, 0.16782048288750692, 0.16991261997963308, 0.1634069015247034, 0.1636094020298611, 0.16486850232630224, 0.16380095205234985, 0.16360837223520233, 0.16732414951905744, 0.17157901638798306, 0.1648479277904527, 0.16916702472638329, 0.1580246996807682, 0.16696456109156366, 0.16662455726630285, 0.16660588499904727, 0.1645244456829634, 0.16325602700380484, 0.1663188368425846, 0.1620157917833471, 0.1639527580410956, 0.16565334393177714, 0.16136054051814688, 0.16188079918825782, 0.16034907640422616, 0.16729348407453018, 0.1647199935270531, 0.16597166917094666, 0.16464567896501034, 0.1036388372440812, 0.06350608023590766, 0.0627703159489807, 0.06139321973952159, 0.06370348692301261, 0.06044180988846298, 0.06324726792528312, 0.06204986106525106, 0.06139640446392816, 0.06122271694969624, 0.06025198687625357, 0.05912171239201439, 0.05907849340921623, 0.059955920919193384, 0.057588086926740514, 0.027108945721939632, 0.023111651983213813, 0.025403930350410383, 0.021909523323076985, 0.02468487308033734, 0.02282992682593259, 0.021712511752177494, 0.022590505933773198, 0.024130978762559565, 0.02331608024114491, 0.025153881469861812, 0.023701742757690863, 0.021766840926902797, 0.023008117019585047, 0.023250977804310777, 0.02488772789666628, 0.02413211185348987, 0.02496103109985275, 0.023732018985615545, 0.025763310233074842, 0.026361454850579058, 0.02404621642402874, 0.028184770060544678, 0.024000314090330002, 0.02405332733795047, 0.02450884938279684, 0.024465472739490325, 0.024205461117340708, 0.024651201434452687], "Term": ["confidentiality", "gtc", "utility", "profile", "cindy", "ashland", "dapsa", "cemex", "solution", "rules", "options", "currency", "sheri", "member", "omnet", "division", "feedback", "independent", "les", "money", "questionnaire", "jedi", "treasury", "futures", "justin", "bad", "leverage", "international", "swd", "ormet", "profile", "dapsa", "solution", "jedi", "tanas", "argentina", "trip", "oem", "traders", "blaquier", "tickler", "presence", "headroom", "hector", "services", "facility", "ramirez", "warrants", "phillip", "relationship", "directly", "pertaining", "heard", "forster", "aquillas", "restricting", "brant", "annual", "pulp", "remind", "action", "confidentiality", "gtc", "cindy", "cemex", "sheri", "omnet", "member", "evangelista", "fees", "usa", "templates", "burns", "gary", "reference", "montreal", "elliott", "cemex2", "dealdate", "domestic", "riverway", "nony", "omlx", "gpb", "letterhead", "edit", "web", "urgent", "gill", "docsee", "fishkins", "proposal", "rose", "messenger", "utility", "independent", "money", "amounts", "maple", "circumstance", "decision", "cushion", "govern", "green", "raised", "hold", "modify", "book", "utilities", "moves", "prevent", "paribas", "definition", "bmo", "involving", "completing", "leaf", "aronowitz", "legs", "posed", "insert", "arranging", "sheets", "privileged", "calculated", "ole", "questionnaire", "mexico", "excluded", "eea", "questionnaires", "martin", "paris", "undertaken", "edmund", "car", "aaa", "requisite", "crack", "shackleton", "queries", "sara", "entitling", "deemed", "columbia", "blanks", "cooper", "obvious", "firm", "undertake", "sources", "vitue", "organising", "mechanism", "flight", "exception", "met", "wed", "authorized", "area", "x33427", "gear", "roll", "receptionist", "station", "lyonnais", "treasury", "futures", "yao", "oil", "gas", "bonds", "hey", "crude", "euro", "libor", "missed", "hunter", "natural", "joe", "managment", "calgary", "understand", "nice", "potential", "gang", "holding", "miss", "appointments", "marie", "sterling", "bankers", "respond", "wouldnt", "individual", "heating", "complicated", "difference", "gilts", "unleaded", "ormet", "justin", "swd", "lets", "swds", "gracie", "builds", "attend", "external", "conference", "english", "descriptions", "show", "intl", "responsible", "casual", "ending", "related", "reach", "proposing", "strike", "sticking", "description", "afternoon", "content", "room", "dinner", "urgently", "seeking", "impasse", "custom", "thursday", "begins", "enforced", "focus", "jim", "shown", "presas", "authorisation", "viewed", "considerable", "heads", "prefer", "words", "feedback", "bad", "survey", "meetings", "perezalonso", "december", "president", "certificates", "executive", "involvement", "sheila", "direct", "instructions", "reports", "staff", "measurement", "critical", "pablo", "memorandum", "item", "vice", "certificate", "walton", "wrong", "middle", "members", "firms", "hesitate", "keohane", "programs", "sort", "l01", "scheduling", "distributed", "arrangement", "ashland", "rules", "division", "leverage", "international", "chemicals", "revisions", "speciality", "reviewers", "illegal", "loaded", "doesnt", "minimize", "lucy", "window", "guidelines", "sanders", "amendment", "amendments", "reduces", "hard", "booked", "unsuccessfully", "fast", "handed", "extent", "including", "select", "guidance", "status", "impression", "lotus", "final", "ultimately", "restrictive", "layman", "heres", "consult", "suggestion", "currency", "options", "greenfield", "plc", "cps", "negotiated", "hedge", "masson", "amended", "national", "shipping", "markets", "spreadsheet", "morgan", "holdings", "petrous", "recently", "aei", "updated", "midland", "attempt", "stanley", "giro", "stack", "mds", "permissible", "teesside", "bermuda", "panther", "westdeutsche", "american", "landesbank", "ubs", "dakota", "les", "htmls20", "jurisdictional", "branson", "kuenning", "stepmom", "meet", "dad", "legaltechshow", "chris", "plan", "convenient", "janet", "birthday", "sit", "exposure", "bermuda", "ultimately", "aei", "davis", "teesside", "hedge", "stack", "sticking", "sanders", "suggestion", "internal", "petrous", "cool", "criterion", "commission", "anticipated", "travel", "eb2601a", "paris", "definition", "weeks", "independent", "strikeout", "federal", "justin", "book", "modify", "money"], "Total": [4.0, 3.0, 3.0, 3.0, 3.0, 2.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.316760379905719, 3.019106391212147, 3.002865885672595, 2.444749163699443, 2.209083002585186, 1.8689195169067454, 1.8762135829581181, 1.8930036170567703, 1.9178202491990484, 1.8945923278581394, 1.8869005272725736, 1.5868622013758091, 1.5597289001302999, 1.6019390034756067, 1.5691712073648543, 1.6406532649056265, 1.5643114279477426, 1.600685938015529, 1.5571080710779601, 1.5738121839711112, 1.62271182121778, 1.5987435504301584, 1.5927830352397325, 1.5620773393741012, 1.5861767063363588, 1.5622017391389358, 1.6059957540228755, 1.5819437946256434, 1.272064183159095, 1.2884582306588317, 1.3632303815103015, 4.467244391417725, 3.6191283468040063, 3.307913126658201, 3.0351633029140257, 2.7768868266890943, 2.74339307559065, 2.7366359531054214, 2.1350973809946825, 2.2132012550367124, 1.872324957425748, 1.8427500964718173, 1.8815476324204496, 1.8990792680017665, 1.8779439983624178, 1.5642211190223452, 1.5314416478832817, 1.5664333815688944, 1.5918730682651576, 1.5309084710250649, 1.6085335871951307, 1.5671182643187365, 1.568591185629834, 1.6174085971080647, 1.59345928060693, 1.612604381034432, 1.5714659560172666, 1.558453026011773, 1.5743553755382906, 1.5821037872573498, 1.5585520823722188, 1.6186972303496354, 1.5975790003631218, 1.63993555259954, 3.231542663812117, 2.3179395337196667, 2.3846494991204055, 1.8406143489116904, 1.5248569237396623, 1.5218319202380193, 1.5686804148668994, 1.5037743225268054, 1.553338612212077, 1.491717446307436, 1.5567187676887737, 1.5524564249050428, 1.5091377536349864, 1.561418080871558, 1.5554757569518551, 1.5329412882834688, 1.5315708414748361, 1.5261800631383051, 1.5250379211462262, 1.5621172398611742, 1.5818510912467112, 1.6262289430303027, 1.603334178132606, 1.2644052041270806, 1.2372818859371035, 1.260232561895472, 1.2902468044778148, 1.2521888092167885, 1.324125296775921, 1.2771573291201201, 1.329722970634835, 1.2901555683021668, 1.8801236255274134, 1.6095624079081925, 1.4018949791418818, 1.4166475854186478, 1.3965233171185534, 1.433022253852259, 1.4343541178514905, 1.4176685645708698, 1.4331445225987551, 1.3897641886219325, 1.4688392002138029, 1.2011705992197717, 1.2029843355801242, 1.164160851999732, 1.2268847963408132, 1.175722967028051, 1.196055721786642, 1.1968977969733074, 1.2031445350068644, 1.200559975446534, 1.2058405825053207, 1.1917274895213135, 1.2440416995164911, 1.2423224545978684, 1.2273726141956656, 1.2061291613882072, 1.2317113066792935, 1.2029973174722295, 1.1895169878011878, 1.1954266245769982, 1.202488782979831, 1.2171865783518792, 1.2438145655033652, 1.2362713230737554, 1.2400630687101597, 1.2256125981134371, 1.2354875128182934, 1.266836516798826, 1.2543967566931367, 1.2537565185418504, 1.787609477326898, 1.832653846813941, 1.5618778389340615, 1.5750830732502448, 1.5990803007019714, 1.412922412141555, 1.3518495116878073, 1.3949029148384111, 1.3977904138185968, 1.3529795987004392, 1.4488254510294922, 1.3926562340971302, 1.3909493778852895, 1.4173689093087676, 1.1747805723623104, 1.1653448625270477, 1.1854208131975088, 1.2169460854653928, 1.2119466816662174, 1.1762324646420215, 1.191492137930683, 1.1894355445688412, 1.1946981355116197, 1.2029839971866627, 1.208905142789395, 1.1484781839023552, 1.2267246116393646, 1.1864060371357272, 1.205591570223401, 1.193153731147279, 1.222377756420774, 1.212792411989853, 1.2089631299558512, 1.2852012142687752, 1.5517320038284113, 1.5812133913511779, 1.6025058137519892, 1.3449082921208801, 1.3453980804917984, 1.3708894911447134, 1.3634698060682569, 1.396053240644917, 1.3906363514639597, 1.3769122688370767, 1.3911232035452867, 1.3863182131770075, 1.1873979528042211, 1.2106352083071126, 1.1929498153362033, 1.143073007361677, 1.1469818595862185, 1.2057245340011027, 1.1718199590416176, 1.1994462338979262, 1.1575051992620242, 1.1988743253079572, 1.1497294040041754, 1.1834247182398048, 1.158826826359795, 1.1595730147341359, 1.1899965344886967, 1.1344441271023769, 1.1813621405308676, 1.166376159490721, 1.2044031367974015, 1.1992639941414687, 1.2230759319058206, 1.2193875110266046, 1.223057641869039, 1.220764444130057, 1.2527362567266243, 1.2134560202859965, 1.219725707594835, 1.2390425249295856, 1.2075343359021449, 1.210475710969746, 1.251780424003727, 1.2498064039502184, 1.7802858000689836, 1.5670064316908283, 1.3653950993277124, 1.354189863087047, 1.4231648806598358, 1.3811009473627955, 1.3799924939419652, 1.391046468671783, 1.3419121154036173, 1.3513437219048527, 1.3863291471405295, 1.3447720220712591, 1.3456288017808806, 1.3732358720036617, 1.3910094457033195, 1.3998823796583617, 1.368914459565552, 1.373829485200889, 1.3461515132541468, 1.4101612907372354, 1.3796428931539986, 1.377691753396126, 1.4446465030731923, 1.1522908555590459, 1.1771149428433458, 1.1468894932038942, 1.1996294319524334, 1.1953702745664743, 1.1495718118923917, 1.1457774700179237, 1.1831529844086974, 1.1727108211547888, 1.2070073440017106, 1.2080079557608083, 1.2126687540090435, 2.1367290313729033, 1.8803374145237162, 1.779831830353877, 1.513413872077055, 1.533417008808512, 1.5663803642997183, 1.3487497414472678, 1.3478088666107353, 1.16282068809952, 1.1738172652884908, 1.1385123429357062, 1.1645598314500065, 1.164405710953992, 1.1503251563251427, 1.1663213694691323, 1.1460961708646078, 1.1604565981286556, 1.1406184397066392, 1.1332705390777762, 1.191170675522604, 1.18476442183606, 1.1693630450828507, 1.1952206587525935, 1.1861424780463174, 1.157986980004596, 1.1412110691355741, 1.1669520935805229, 1.1636585218172206, 1.2270121749696392, 1.1760656882831713, 1.2147261323344658, 1.2049135121915509, 1.2118991484983364, 1.2160004237860502, 1.2385425382577433, 1.2627130368431472, 1.2070771121052242, 1.2014693805978358, 1.2535282809046455, 1.3926721727845823, 1.4357189551583962, 1.1897017186174672, 1.203211818749286, 1.2485971941945113, 1.2343994502158717, 1.0673587746629636, 1.1032512281389057, 1.0669759701773487, 1.0751565422966134, 1.0850542184874954, 1.0838423138959874, 1.083189808377538, 1.1111743710542914, 1.1415463921764188, 1.0985977525354476, 1.1306099845389548, 1.0567342953574896, 1.1170768895691356, 1.1157786385968314, 1.1191074373510823, 1.1073231603920317, 1.0995728676650518, 1.1204779345996387, 1.0916466581072783, 1.1053250512579273, 1.1173262278958955, 1.094741771105334, 1.1028634297795312, 1.0948169720657688, 1.1432024163249974, 1.1473803698343317, 1.1733053327742509, 1.164107218714719, 1.0457966562820653, 1.0283703583206794, 1.0231906621721931, 1.0225466049430016, 1.0610608216562878, 1.0094433729257166, 1.070977738805429, 1.0784463171712417, 1.0680427279466866, 1.0684958617443978, 1.052173208069192, 1.047673745301495, 1.0507846100235558, 1.0753355718729447, 1.0374453401841752, 1.2614375651201117, 1.094741771105334, 1.2160004237860502, 1.0567342953574896, 1.207115834210556, 1.1173262278958955, 1.0673587746629636, 1.1204779345996387, 1.1988743253079572, 1.1604565981286556, 1.2535282809046455, 1.1897432608221665, 1.0985977525354476, 1.1617734549533925, 1.1847841295173074, 1.284978779389922, 1.2501639226866639, 1.32198038070612, 1.2253853564278077, 1.4343541178514905, 1.5250379211462262, 1.2752252400705522, 2.3179395337196667, 1.3206223774577706, 1.339444468226007, 1.5812133913511779, 1.561418080871558, 1.5091377536349864, 2.3846494991204055], "loglift": [30.0, 29.0, 28.0, 27.0, 26.0, 25.0, 24.0, 23.0, 22.0, 21.0, 20.0, 19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 13.0, 12.0, 11.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 1.5379, 1.5032, 1.496, 1.4203, 1.3214, 1.2459, 1.2397, 1.2375, 1.2316, 1.2295, 1.2222, 1.0956, 1.0777, 1.0776, 1.0749, 1.0674, 1.0621, 1.0584, 1.0569, 1.055, 1.0544, 1.0504, 1.0444, 1.0393, 1.0391, 1.0378, 1.0326, 1.0287, 0.8728, 0.829, 0.7938, 1.6243, 1.5625, 1.5365, 1.4983, 1.4608, 1.4592, 1.4572, 1.3519, 1.3278, 1.2277, 1.2195, 1.2194, 1.2119, 1.202, 1.0988, 1.0883, 1.0761, 1.0704, 1.0694, 1.0666, 1.0645, 1.0644, 1.0642, 1.0614, 1.0588, 1.0583, 1.0539, 1.0535, 1.0524, 1.0507, 1.0425, 1.0433, 1.0264, 1.6016, 1.4529, 1.4446, 1.2748, 1.1389, 1.1248, 1.1223, 1.1187, 1.1078, 1.1041, 1.0992, 1.0979, 1.097, 1.0969, 1.0964, 1.0952, 1.0948, 1.0944, 1.0876, 1.0851, 1.0785, 1.0771, 1.0661, 0.8622, 0.8565, 0.8546, 0.8535, 0.8525, 0.8408, 0.8403, 0.8132, 0.8284, 1.6015, 1.478, 1.3017, 1.2817, 1.2799, 1.2763, 1.2637, 1.2627, 1.2565, 1.2529, 1.249, 0.9989, 0.9979, 0.993, 0.9801, 0.9782, 0.9684, 0.9649, 0.9623, 0.9593, 0.9578, 0.9571, 0.9557, 0.9547, 0.954, 0.9493, 0.9488, 0.9476, 0.9472, 0.9469, 0.9469, 0.9451, 0.9408, 0.9372, 0.9345, 0.9405, 0.9348, 0.9145, 0.9218, 0.9208, 1.6296, 1.6124, 1.5336, 1.5165, 1.4975, 1.321, 1.3115, 1.2997, 1.2969, 1.2912, 1.2823, 1.2675, 1.2659, 1.2646, 1.0549, 1.0533, 1.0379, 1.0364, 1.0244, 1.0051, 1.0004, 0.9993, 0.9944, 0.9916, 0.9907, 0.9897, 0.9837, 0.9831, 0.9824, 0.9783, 0.978, 0.9753, 0.9732, 0.9136, 1.5539, 1.5467, 1.546, 1.3903, 1.3711, 1.3511, 1.3454, 1.3334, 1.3311, 1.3293, 1.3073, 1.2965, 1.04, 1.0369, 1.0072, 1.0061, 1.0058, 1.0032, 1.0027, 1.0014, 0.9953, 0.9941, 0.9923, 0.9881, 0.9878, 0.9876, 0.9873, 0.9872, 0.987, 0.9865, 0.9863, 0.9859, 0.985, 0.9828, 0.9813, 0.9807, 0.9747, 0.9812, 0.9777, 0.9648, 0.9773, 0.975, 0.9452, 0.9433, 1.677, 1.5629, 1.3726, 1.3665, 1.3617, 1.3558, 1.3488, 1.3486, 1.3462, 1.3419, 1.3417, 1.3388, 1.3373, 1.3351, 1.3333, 1.3306, 1.33, 1.3264, 1.3245, 1.3191, 1.317, 1.3124, 1.2724, 1.0703, 1.0632, 1.0497, 1.0447, 1.0344, 1.0329, 1.0324, 1.032, 1.0307, 1.0223, 1.013, 1.0082, 1.8711, 1.8209, 1.6824, 1.5929, 1.5595, 1.553, 1.3664, 1.352, 1.0711, 1.049, 1.0452, 1.0428, 1.0353, 1.0343, 1.0312, 1.0308, 1.0307, 1.0293, 1.0254, 1.0246, 1.0225, 1.0192, 1.0187, 1.0186, 1.0167, 1.0158, 1.0138, 1.0096, 1.009, 1.0058, 1.0027, 1.0032, 0.998, 0.9927, 0.9811, 0.9686, 0.9932, 0.9961, 0.9521, 1.9846, 1.9835, 1.5653, 1.5384, 1.516, 1.5072, 1.2123, 1.1916, 1.186, 1.1796, 1.1781, 1.1727, 1.1721, 1.1691, 1.1672, 1.1655, 1.1627, 1.1621, 1.1616, 1.1607, 1.1577, 1.1557, 1.155, 1.1547, 1.1546, 1.154, 1.1535, 1.1477, 1.1435, 1.1413, 1.1405, 1.1213, 1.1066, 1.1064, 1.8201, 1.3472, 1.3406, 1.319, 1.319, 1.3163, 1.3025, 1.2764, 1.2755, 1.2723, 1.2717, 1.257, 1.2533, 1.245, 1.2406, 0.2916, 0.2738, 0.2633, 0.2557, 0.242, 0.2411, 0.2367, 0.2278, 0.2261, 0.2243, 0.223, 0.2158, 0.2103, 0.2099, 0.2008, 0.1876, 0.1843, 0.1622, 0.1876, 0.1122, 0.0739, 0.1609, -0.2779, 0.124, 0.112, -0.0352, -0.0243, -0.001, -0.4402], "logprob": [30.0, 29.0, 28.0, 27.0, 26.0, 25.0, 24.0, 23.0, 22.0, 21.0, 20.0, 19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 13.0, 12.0, 11.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, -4.354, -4.4828, -4.4953, -4.7766, -4.9769, -5.2196, -5.222, -5.2153, -5.2081, -5.2224, -5.2337, -5.5335, -5.5687, -5.5421, -5.5655, -5.5284, -5.5814, -5.562, -5.5912, -5.5824, -5.5525, -5.5713, -5.581, -5.6056, -5.5904, -5.6071, -5.5846, -5.6036, -5.9775, -6.0084, -5.9872, -3.9698, -4.2422, -4.3581, -4.4824, -4.6087, -4.6225, -4.6269, -4.9805, -4.9686, -5.236, -5.2602, -5.2394, -5.2377, -5.2588, -5.5447, -5.5764, -5.566, -5.5556, -5.5957, -5.549, -5.5771, -5.5763, -5.5459, -5.5636, -5.5543, -5.5806, -5.5933, -5.5836, -5.5798, -5.5965, -5.5668, -5.5791, -5.5699, -4.3163, -4.7973, -4.7773, -5.206, -5.5301, -5.5462, -5.5183, -5.5643, -5.5427, -5.5869, -5.5491, -5.5532, -5.5824, -5.5484, -5.5527, -5.5685, -5.5698, -5.5737, -5.5813, -5.5598, -5.5538, -5.5275, -5.5528, -5.9941, -6.0215, -6.005, -5.9826, -6.0135, -5.9694, -6.006, -5.9927, -6.0077, -4.8581, -5.1369, -5.4513, -5.461, -5.477, -5.4548, -5.4665, -5.4792, -5.4746, -5.5088, -5.4575, -5.9088, -5.9082, -5.9459, -5.9064, -5.9508, -5.9434, -5.9463, -5.9437, -5.9489, -5.9459, -5.9585, -5.9168, -5.9192, -5.932, -5.9542, -5.9337, -5.9584, -5.9702, -5.9655, -5.9597, -5.9493, -5.9319, -5.9416, -5.9413, -5.9469, -5.9447, -5.9398, -5.9425, -5.944, -4.8804, -4.8728, -5.1114, -5.1201, -5.124, -5.4242, -5.4779, -5.4584, -5.4591, -5.4974, -5.4379, -5.4922, -5.495, -5.4775, -5.8749, -5.8846, -5.8829, -5.8582, -5.8743, -5.9235, -5.9154, -5.9182, -5.9187, -5.9145, -5.9105, -5.9628, -5.9029, -5.9369, -5.9215, -5.936, -5.9121, -5.9227, -5.9279, -5.9264, -5.0976, -5.086, -5.0734, -5.4043, -5.4231, -5.4244, -5.4354, -5.4239, -5.43, -5.4418, -5.4535, -5.4677, -5.8791, -5.8629, -5.9073, -5.9511, -5.948, -5.9006, -5.9297, -5.9077, -5.9493, -5.9155, -5.9591, -5.9343, -5.9557, -5.9553, -5.9297, -5.9776, -5.9372, -5.9505, -5.9186, -5.9233, -5.9046, -5.9098, -5.9082, -5.9107, -5.8909, -5.9163, -5.9146, -5.9117, -5.925, -5.9249, -5.9212, -5.9246, -4.8371, -5.0788, -5.4068, -5.4212, -5.3764, -5.4122, -5.42, -5.4122, -5.4507, -5.4479, -5.4225, -5.4559, -5.4567, -5.4386, -5.4276, -5.4239, -5.4469, -5.447, -5.4692, -5.4281, -5.4521, -5.4581, -5.4507, -5.8789, -5.8646, -5.9041, -5.8642, -5.878, -5.9186, -5.9225, -5.8908, -5.9009, -5.8805, -5.889, -5.8899, -4.4606, -4.6385, -4.832, -5.0836, -5.1039, -5.0891, -5.4254, -5.4405, -5.869, -5.8817, -5.916, -5.8957, -5.9034, -5.9165, -5.9059, -5.9238, -5.9114, -5.93, -5.9404, -5.8914, -5.8988, -5.9153, -5.8939, -5.9016, -5.9276, -5.943, -5.9227, -5.9298, -5.8773, -5.923, -5.8937, -5.9013, -5.9007, -5.9026, -5.8959, -5.889, -5.9095, -5.9112, -5.9128, -4.7751, -4.7458, -5.3519, -5.3675, -5.3529, -5.3731, -5.8135, -5.8011, -5.8401, -5.8389, -5.8312, -5.8377, -5.8389, -5.8164, -5.7913, -5.8313, -5.8055, -5.8736, -5.8186, -5.8206, -5.8207, -5.8333, -5.841, -5.8224, -5.8487, -5.8368, -5.8265, -5.8527, -5.8495, -5.859, -5.8166, -5.8321, -5.8245, -5.8326, -5.226, -5.7158, -5.7274, -5.7496, -5.7127, -5.7652, -5.7199, -5.739, -5.7496, -5.7524, -5.7684, -5.7873, -5.788, -5.7733, -5.8136, -6.5671, -6.7266, -6.632, -6.78, -6.6607, -6.7388, -6.789, -6.7494, -6.6834, -6.7178, -6.6419, -6.7014, -6.7865, -6.7311, -6.7206, -6.6525, -6.6834, -6.6496, -6.7001, -6.618, -6.595, -6.6869, -6.5281, -6.6888, -6.6866, -6.6679, -6.6697, -6.6803, -6.6621]}, "token.table": {"Topic": [4, 3, 1, 1, 1, 8, 7, 1, 3, 5, 3, 1, 2, 4, 2, 2, 8, 2, 3, 3, 2, 3, 1, 2, 3, 3, 1, 8, 2, 2, 2, 4, 4, 2, 2, 4, 1, 7, 2, 2, 1, 5, 2, 5, 2, 3, 2, 3, 2, 1, 1, 1, 3, 3, 8, 3, 1, 6, 3, 2, 8, 3, 4, 2, 2, 4, 5, 3, 3, 2, 3, 2, 1, 5, 2, 2, 6, 3, 4, 1, 1, 1, 3, 1, 2, 4, 4, 3, 1, 2, 1, 1, 2, 2, 8, 1, 2, 1, 6, 1, 2, 1, 1, 5, 1, 4, 2, 2, 3, 3, 1, 2, 5], "Freq": [0.6808097168529005, 0.5432968620456943, 0.6321337100580388, 0.6304467818782504, 0.5350685200479383, 0.4680050606873041, 0.6381594738708136, 0.5278180352025983, 0.640156816967765, 0.7077529462387876, 0.6404434611400275, 0.6226666524460538, 0.5314773767983677, 0.7195465304020991, 0.6589431277321464, 0.6383929324836202, 0.6384145401663471, 0.6046107994439648, 0.6571027895403829, 0.6149195685427954, 0.8954065749535945, 0.6649934002860822, 0.6624476718745298, 0.6281907897906784, 0.6374784758722501, 0.655721399536344, 0.61625236651665, 0.5618508349753324, 0.6320697845831886, 0.6532069153229132, 0.620114897218953, 0.697766334261025, 0.705891860680707, 0.6529794990113882, 0.46836271211860503, 0.7133201950777461, 0.6095133087474897, 0.5617075640109309, 0.4518341916372228, 0.641621163200356, 0.6401731686349689, 0.5456567816876573, 0.5265709635449877, 0.6253594641626287, 0.6351806050511869, 0.6437746362178695, 0.6182729594661518, 0.6703682406312117, 0.8289288780402749, 0.6411370590853706, 0.6278319004380206, 0.6242434935602261, 0.6441404627902299, 0.43141763857630494, 0.6521383252276659, 0.6321707558527937, 0.8180798380859491, 0.6324257089332391, 0.6237002950717948, 0.6275654559676678, 0.6607577863863305, 0.6557992323289796, 0.6978258692855565, 0.7308242799815893, 0.609780060207154, 0.6212868759153071, 0.6902142692823554, 0.6626300333361543, 0.4193488394704786, 0.639295805330266, 0.652340704528719, 0.6381139335611813, 0.5282610085842273, 0.6348871478483109, 0.6375147388058741, 0.729024221062234, 0.6444411776858466, 0.6552306796248447, 0.6971779057586515, 0.6254911863325046, 0.6422161817629759, 0.6301744405613797, 0.6529244178069122, 0.6029980375178178, 0.6177807568028036, 0.5318799181194691, 0.7160639480501478, 0.6423767868390757, 0.6392588982821176, 0.53249724212863, 0.6353998337188854, 0.6401221909733542, 0.6216842520172321, 0.6259471361182796, 0.5318194448911165, 0.6372790905839544, 0.720231008616443, 0.6660304109958715, 0.624022697090049, 0.45267651728330127, 0.5426671809241139, 0.5299696436279305, 0.5214253006336942, 0.5594062980105421, 0.5329883596852324, 0.7053834901831948, 0.6416619450886457, 0.5340953214525838, 0.6428901225433575, 0.6188994570291957, 0.6247321702842988, 0.6363484975101887, 0.6402549386848797], "Term": ["aaa", "amounts", "annual", "aquillas", "argentina", "ashland", "bad", "blaquier", "bmo", "bonds", "book", "brant", "burns", "car", "cemex", "cemex2", "chemicals", "cindy", "circumstance", "completing", "confidentiality", "cushion", "dapsa", "dealdate", "decision", "definition", "directly", "division", "docsee", "domestic", "edit", "edmund", "eea", "elliott", "evangelista", "excluded", "facility", "feedback", "fees", "fishkins", "forster", "futures", "gary", "gas", "gill", "govern", "gpb", "green", "gtc", "headroom", "heard", "hector", "hold", "independent", "international", "involving", "jedi", "justin", "leaf", "letterhead", "leverage", "maple", "martin", "member", "messenger", "mexico", "missed", "modify", "money", "montreal", "moves", "nony", "oem", "oil", "omlx", "omnet", "ormet", "paribas", "paris", "pertaining", "phillip", "presence", "prevent", "profile", "proposal", "questionnaire", "questionnaires", "raised", "ramirez", "reference", "relationship", "restricting", "riverway", "rose", "rules", "services", "sheri", "solution", "swd", "tanas", "templates", "tickler", "traders", "treasury", "trip", "undertaken", "urgent", "usa", "utilities", "utility", "warrants", "web", "yao"]}, "R": 30, "lambda.step": 0.01, "plot.opts": {"xlab": "PC1", "ylab": "PC2"}, "topic.order": [8, 6, 2, 5, 9, 7, 3, 4, 10, 1]};
+
+   !function(LDAvis){
+       new LDAvis("#" + "ldavis_el335921406368103716249969828584", ldavis_el335921406368103716249969828584_data);
+   }(LDAvis);
+
+
+</script>

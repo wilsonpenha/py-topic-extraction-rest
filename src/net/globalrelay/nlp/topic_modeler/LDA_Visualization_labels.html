@@ -1,0 +1,1430 @@
+
+<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/d3/3.5.5/d3.min.js"></script>
+
+<link rel="stylesheet" type="text/css" href="https://cdn.rawgit.com/bmabey/pyLDAvis/files/ldavis.v1.0.0.css">
+
+<div id="ldavis_el1432891397175660861444859021390" width="100%" align="center"></div>
+<script type="text/javascript">
+
+/* Original code taken from https://github.com/cpsievert/LDAvis */
+/* Copyright 2013, AT&T Intellectual Property */
+/* MIT Licence */
+
+'use strict';
+
+var LDAvis = function(to_select, data_or_file_name) { //added additional input variable
+
+    // This section sets up the logic for event handling
+    var current_clicked = {
+        what: "nothing",
+        element: undefined
+    },
+        current_hover = {
+            what: "nothing",
+            element: undefined
+        },
+        old_winning_state = {
+            what: "nothing",
+            element: undefined
+        },
+        vis_state = {
+            lambda: 1,
+            topic: 0,
+            term: ""
+        };
+
+    // Set up a few 'global' variables to hold the data:
+    var K, // number of topics
+        R, // number of terms to display in bar chart
+        mdsData, // (x,y) locations and topic proportions
+        mdsData3, // topic proportions for all terms in the viz
+        lamData, // all terms that are among the top-R most relevant for all topics, lambda values
+        lambda = {
+            old: 1,
+            current: 1
+        },
+         // --------- for THE ONE ---------
+        topicNames = [],
+        // --------- nomore for THE ONE -----------
+        color1 = "#1f77b4", // baseline color for default topic circles and overall term frequencies
+        color2 = "#d62728"; // 'highlight' color for selected topics and term-topic frequencies
+
+    // Set the duration of each half of the transition:
+    var duration = 750;
+
+    // Set global margins used for everything
+    var margin = {
+        top: 30,
+        right: 30,
+        bottom: 70,
+        left: 30
+    },
+        mdswidth = 530,
+        mdsheight = 530,
+        barwidth = 530,
+        barheight = 530,
+        termwidth = 90, // width to add between two panels to display terms
+        mdsarea = mdsheight * mdswidth;
+    // controls how big the maximum circle can be
+    // doesn't depend on data, only on mds width and height:
+    var rMax = 60;
+
+    // proportion of area of MDS plot to which the sum of default topic circle areas is set
+    var circle_prop = 0.25;
+    var word_prop = 0.25;
+
+    // opacity of topic circles:
+    var base_opacity = 0.2,
+        highlight_opacity = 0.6;
+
+    // topic/lambda selection names are specific to *this* vis
+    var topic_select = to_select + "-topic";
+    var lambda_select = to_select + "-lambda";
+
+    // get rid of the # in the to_select (useful) for setting ID values
+    var visID = to_select.replace("#", "");
+    var topicID = visID + "-topic";
+    var lambdaID = visID + "-lambda";
+    var termID = visID + "-term";
+    var topicDown = topicID + "-down";
+    var topicUp = topicID + "-up";
+    var topicClear = topicID + "-clear";
+
+    var leftPanelID = visID + "-leftpanel";
+    var barFreqsID = visID + "-bar-freqs";
+    var topID = visID + "-top";
+    var lambdaInputID = visID + "-lambdaInput";
+    var lambdaZeroID = visID + "-lambdaZero";
+    var sliderDivID = visID + "-sliderdiv";
+    var lambdaLabelID = visID + "-lamlabel";
+    
+
+    //////////////////////////////////////////////////////////////////////////////
+
+    // sort array according to a specified object key name
+    // Note that default is decreasing sort, set decreasing = -1 for increasing
+    // adpated from http://stackoverflow.com/questions/16648076/sort-array-on-key-value
+    function fancysort(key_name, decreasing) {
+        decreasing = (typeof decreasing === "undefined") ? 1 : decreasing;
+        return function(a, b) {
+            if (a[key_name] < b[key_name])
+                return 1 * decreasing;
+            if (a[key_name] > b[key_name])
+                return -1 * decreasing;
+            return 0;
+        };
+    }
+
+
+    function visualize(data) {
+        // set the number of topics to global variable K:
+        K = data['mdsDat'].x.length;
+
+        // R is the number of top relevant (or salient) words whose bars we display
+        R = Math.min(data['R'], 30);
+
+        // ----------- fuse for THE ONE ------------
+        var cut_names=0;
+        if(data['mdsDat'].hasOwnProperty('topic.names')){ //if by anycase length of NAMES variable doesn't match overall amount of topics OR variable doesnt exists - set names to numbers
+            if (K!=data['mdsDat']['topic.names'].length){
+                cut_names=1;
+            }
+        } else{
+            cut_names=1;
+        }
+        if (cut_names==1) {
+            for (var i = 0; i < K; i++) {
+                topicNames[i] = i+1;
+            }
+        }
+        else{
+            for (var i = 0; i < K; i++) {
+                topicNames[i] = data['mdsDat']['topic.names'][i];
+            }
+        }
+        // ----------- enough for THE ONE ------------
+        
+        // a (K x 5) matrix with columns x, y, topics, Freq, cluster (where x and y are locations for left panel)
+        mdsData = [];
+        for (var i = 0; i < K; i++) {
+            var obj = {};
+            for (var key in data['mdsDat']) {
+                obj[key] = data['mdsDat'][key][i];
+            }
+            mdsData.push(obj);
+        }
+
+        // a huge matrix with 3 columns: Term, Topic, Freq, where Freq is all non-zero probabilities of topics given terms
+        // for the terms that appear in the barcharts for this data
+        mdsData3 = [];
+        for (var i = 0; i < data['token.table'].Term.length; i++) {
+            var obj = {};
+            for (var key in data['token.table']) {
+                obj[key] = data['token.table'][key][i];
+            }
+            mdsData3.push(obj);
+        }
+
+        // large data for the widths of bars in bar-charts. 6 columns: Term, logprob, loglift, Freq, Total, Category
+        // Contains all possible terms for topics in (1, 2, ..., k) and lambda in the user-supplied grid of lambda values
+        // which defaults to (0, 0.01, 0.02, ..., 0.99, 1).
+        lamData = [];
+        for (var i = 0; i < data['tinfo'].Term.length; i++) {
+            var obj = {};
+            for (var key in data['tinfo']) {
+                obj[key] = data['tinfo'][key][i];
+            }
+            lamData.push(obj);
+        }
+        var dat3 = lamData.slice(0, R);
+
+        // Create the topic input & lambda slider forms. Inspired from:
+        // http://bl.ocks.org/d3noob/10632804
+        // http://bl.ocks.org/d3noob/10633704
+        init_forms(topicID, lambdaID, visID);
+
+        // When the value of lambda changes, update the visualization
+        console.log('lambda_select', lambda_select);
+        d3.select(lambda_select)
+            .on("mouseup", function() {
+                console.log('lambda_select mouseup');
+                // store the previous lambda value
+                lambda.old = lambda.current;
+                lambda.current = document.getElementById(lambdaID).value;
+                vis_state.lambda = +this.value;
+                // adjust the text on the range slider
+                d3.select(lambda_select).property("value", vis_state.lambda);
+                d3.select(lambda_select + "-value").text(vis_state.lambda);
+                // transition the order of the bars
+                var increased = lambda.old < vis_state.lambda;
+                if (vis_state.topic > 0) reorder_bars(increased);
+                // store the current lambda value
+                state_save(true);
+                document.getElementById(lambdaID).value = vis_state.lambda;
+            });
+
+        d3.select("#" + topicUp)
+            .on("click", function() {
+                // remove term selection if it exists (from a saved URL)
+                var termElem = document.getElementById(termID + vis_state.term);
+                if (termElem !== undefined) term_off(termElem);
+                vis_state.term = "";
+                var value_old = document.getElementById(topicID).value;
+                var value_new = Math.min(K, +value_old + 1).toFixed(0);
+                // increment the value in the input box
+                document.getElementById(topicID).value = value_new;
+                topic_off(document.getElementById(topicID + value_old));
+                topic_on(document.getElementById(topicID + value_new));
+                vis_state.topic = value_new;
+                state_save(true);
+            });
+
+        d3.select("#" + topicDown)
+            .on("click", function() {
+                // remove term selection if it exists (from a saved URL)
+                var termElem = document.getElementById(termID + vis_state.term);
+                if (termElem !== undefined) term_off(termElem);
+                vis_state.term = "";
+                var value_old = document.getElementById(topicID).value;
+                var value_new = Math.max(0, +value_old - 1).toFixed(0);
+                // increment the value in the input box
+                document.getElementById(topicID).value = value_new;
+                topic_off(document.getElementById(topicID + value_old));
+                topic_on(document.getElementById(topicID + value_new));
+                vis_state.topic = value_new;
+                state_save(true);
+            });
+
+        d3.select("#" + topicID)
+            .on("keyup", function() {
+                // remove term selection if it exists (from a saved URL)
+                var termElem = document.getElementById(termID + vis_state.term);
+                if (termElem !== undefined) term_off(termElem);
+                vis_state.term = "";
+                topic_off(document.getElementById(topicID + vis_state.topic));
+                var value_new = document.getElementById(topicID).value;
+                if (!isNaN(value_new) && value_new > 0) {
+                    value_new = Math.min(K, Math.max(1, value_new));
+                    topic_on(document.getElementById(topicID + value_new));
+                    vis_state.topic = value_new;
+                    state_save(true);
+                    document.getElementById(topicID).value = vis_state.topic;
+                }
+            });
+
+        d3.select("#" + topicClear)
+            .on("click", function() {
+                state_reset();
+                state_save(true);
+            });
+
+        // create linear scaling to pixels (and add some padding on outer region of scatterplot)
+        var xrange = d3.extent(mdsData, function(d) {
+            return d.x;
+        }); //d3.extent returns min and max of an array
+        var xdiff = xrange[1] - xrange[0],
+            xpad = 0.05;
+        var yrange = d3.extent(mdsData, function(d) {
+            return d.y;
+        });
+        var ydiff = yrange[1] - yrange[0],
+            ypad = 0.05;
+
+        if (xdiff > ydiff) {
+            var xScale = d3.scale.linear()
+                    .range([0, mdswidth])
+                    .domain([xrange[0] - xpad * xdiff, xrange[1] + xpad * xdiff]);
+
+            var yScale = d3.scale.linear()
+                    .range([mdsheight, 0])
+                    .domain([yrange[0] - 0.5*(xdiff - ydiff) - ypad*xdiff, yrange[1] + 0.5*(xdiff - ydiff) + ypad*xdiff]);
+        } else {
+            var xScale = d3.scale.linear()
+                    .range([0, mdswidth])
+                    .domain([xrange[0] - 0.5*(ydiff - xdiff) - xpad*ydiff, xrange[1] + 0.5*(ydiff - xdiff) + xpad*ydiff]);
+
+            var yScale = d3.scale.linear()
+                    .range([mdsheight, 0])
+                    .domain([yrange[0] - ypad * ydiff, yrange[1] + ypad * ydiff]);
+        }
+
+        // Create new svg element (that will contain everything):
+        var svg = d3.select(to_select).append("svg")
+                .attr("width", mdswidth + barwidth + margin.left + termwidth + margin.right)
+                .attr("height", mdsheight + 2 * margin.top + margin.bottom + 2 * rMax);
+
+        // Create a group for the mds plot
+        var mdsplot = svg.append("g")
+                .attr("id", leftPanelID)
+                .attr("class", "points")
+                .attr("transform", "translate(" + margin.left + "," + 2 * margin.top + ")");
+
+        // Clicking on the mdsplot should clear the selection
+        mdsplot
+            .append("rect")
+            .attr("x", 0)
+            .attr("y", 0)
+            .attr("height", mdsheight)
+            .attr("width", mdswidth)
+            .style("fill", color1)
+            .attr("opacity", 0)
+            .on("click", function() {
+                state_reset();
+                state_save(true);
+            });
+
+        mdsplot.append("line") // draw x-axis
+            .attr("x1", 0)
+            .attr("x2", mdswidth)
+            .attr("y1", mdsheight / 2)
+            .attr("y2", mdsheight / 2)
+            .attr("stroke", "gray")
+            .attr("opacity", 0.3);
+        mdsplot.append("text") // label x-axis
+            .attr("x", 0)
+            .attr("y", mdsheight/2 - 5)
+            .text(data['plot.opts'].xlab)
+            .attr("fill", "gray");
+
+        mdsplot.append("line") // draw y-axis
+            .attr("x1", mdswidth / 2)
+            .attr("x2", mdswidth / 2)
+            .attr("y1", 0)
+            .attr("y2", mdsheight)
+            .attr("stroke", "gray")
+            .attr("opacity", 0.3);
+        mdsplot.append("text") // label y-axis
+            .attr("x", mdswidth/2 + 5)
+            .attr("y", 7)
+            .text(data['plot.opts'].ylab)
+            .attr("fill", "gray");
+
+        // new definitions based on fixing the sum of the areas of the default topic circles:
+        var newSmall = Math.sqrt(0.02*mdsarea*circle_prop/Math.PI);
+        var newMedium = Math.sqrt(0.05*mdsarea*circle_prop/Math.PI);
+        var newLarge = Math.sqrt(0.10*mdsarea*circle_prop/Math.PI);
+        var cx = 10 + newLarge,
+            cx2 = cx + 1.5 * newLarge;
+
+        // circle guide inspired from
+        // http://www.nytimes.com/interactive/2012/02/13/us/politics/2013-budget-proposal-graphic.html?_r=0
+        var circleGuide = function(rSize, size) {
+            d3.select("#" + leftPanelID).append("circle")
+                .attr('class', "circleGuide" + size)
+                .attr('r', rSize)
+                .attr('cx', cx)
+                .attr('cy', mdsheight + rSize)
+                .style('fill', 'none')
+                .style('stroke-dasharray', '2 2')
+                .style('stroke', '#999');
+            d3.select("#" + leftPanelID).append("line")
+                .attr('class', "lineGuide" + size)
+                .attr("x1", cx)
+                .attr("x2", cx2)
+                .attr("y1", mdsheight + 2 * rSize)
+                .attr("y2", mdsheight + 2 * rSize)
+                .style("stroke", "gray")
+                .style("opacity", 0.3);
+        };
+
+        circleGuide(newSmall, "Small");
+        circleGuide(newMedium, "Medium");
+        circleGuide(newLarge, "Large");
+
+        var defaultLabelSmall = "2%";
+        var defaultLabelMedium = "5%";
+        var defaultLabelLarge = "10%";
+
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", 10)
+            .attr("y", mdsheight - 10)
+            .attr('class', "circleGuideTitle")
+            .style("text-anchor", "left")
+            .style("fontWeight", "bold")
+            .text("Marginal topic distribtion");
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", cx2 + 10)
+            .attr("y", mdsheight + 2 * newSmall)
+            .attr('class', "circleGuideLabelSmall")
+            .style("text-anchor", "start")
+            .text(defaultLabelSmall);
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", cx2 + 10)
+            .attr("y", mdsheight + 2 * newMedium)
+            .attr('class', "circleGuideLabelMedium")
+            .style("text-anchor", "start")
+            .text(defaultLabelMedium);
+        d3.select("#" + leftPanelID).append("text")
+            .attr("x", cx2 + 10)
+            .attr("y", mdsheight + 2 * newLarge)
+            .attr('class', "circleGuideLabelLarge")
+            .style("text-anchor", "start")
+            .text(defaultLabelLarge);
+
+        // bind mdsData to the points in the left panel:
+        var points = mdsplot.selectAll("points")
+                .data(mdsData)
+                .enter();
+
+        // text to indicate topic
+        // ------------------ THE ONE -------------------
+        points.append("text")
+            .attr("class", "txt")
+            .attr("x", function(d) {
+                return (xScale(+d.x));
+            })
+            .attr("y", function(d) {
+                return (yScale(+d.y) + 4);
+            })
+            //.attr("stroke", "black")
+            .attr("opacity", 1)
+            .style("text-anchor", "middle")
+            .style("font-size", "12px")
+            .style("fontWeight", 100)
+            .text(function(d) {
+                return topicNames[d.topics-1]; // only one that changed from d.topics to topicNames[d.topics-1]
+            });
+        // ------------------ THE ONE finished-------------------
+
+        // draw circles
+        points.append("circle")
+            .attr("class", "dot")
+            .style("opacity", 0.2)
+            .style("fill", color1)
+            .attr("r", function(d) {
+                //return (rScaleMargin(+d.Freq));
+                return (Math.sqrt((d.Freq/100)*mdswidth*mdsheight*circle_prop/Math.PI));
+            })
+            .attr("cx", function(d) {
+                return (xScale(+d.x));
+            })
+            .attr("cy", function(d) {
+                return (yScale(+d.y));
+            })
+            .attr("stroke", "black")
+            .attr("id", function(d) {
+                return (topicID + d.topics);
+                
+            })
+            .on("mouseover", function(d) {
+                var old_topic = topicID + vis_state.topic;
+                if (vis_state.topic > 0 && old_topic != this.id) {
+                    topic_off(document.getElementById(old_topic));
+                }
+                topic_on(this);
+            })
+            .on("click", function(d) {
+                // prevent click event defined on the div container from firing
+                // http://bl.ocks.org/jasondavies/3186840
+                d3.event.stopPropagation();
+                var old_topic = topicID + vis_state.topic;
+                if (vis_state.topic > 0 && old_topic != this.id) {
+                    topic_off(document.getElementById(old_topic));
+                }
+                // make sure topic input box value and fragment reflects clicked selection
+                document.getElementById(topicID).value = vis_state.topic = d.topics;
+                state_save(true);
+                topic_on(this);
+            })
+            .on("mouseout", function(d) {
+                if (vis_state.topic != d.topics) topic_off(this);
+                if (vis_state.topic > 0) topic_on(document.getElementById(topicID + vis_state.topic));
+            });
+
+        svg.append("text")
+            .text("Intertopic Distance Map (via multidimensional scaling)")
+            .attr("x", mdswidth/2 + margin.left)
+            .attr("y", 30)
+            .style("font-size", "16px")
+            .style("text-anchor", "middle");
+
+        // establish layout and vars for bar chart
+        var barDefault2 = dat3.filter(function(d) {
+            return d.Category == "Default";
+        });
+
+        var y = d3.scale.ordinal()
+                .domain(barDefault2.map(function(d) {
+                    return d.Term;
+                }))
+                .rangeRoundBands([0, barheight], 0.15);
+        var x = d3.scale.linear()
+                .domain([1, d3.max(barDefault2, function(d) {
+                    return d.Total;
+                })])
+                .range([0, barwidth])
+                .nice();
+        var yAxis = d3.svg.axis()
+                .scale(y);
+
+        // Add a group for the bar chart
+        var chart = svg.append("g")
+                .attr("transform", "translate(" + +(mdswidth + margin.left + termwidth) + "," + 2 * margin.top + ")")
+                .attr("id", barFreqsID);
+
+        // bar chart legend/guide:
+        var barguide = {"width": 100, "height": 15};
+        d3.select("#" + barFreqsID).append("rect")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10)
+            .attr("height", barguide.height)
+            .attr("width", barguide.width)
+            .style("fill", color1)
+            .attr("opacity", 0.4);
+        d3.select("#" + barFreqsID).append("text")
+            .attr("x", barguide.width + 5)
+            .attr("y", mdsheight + 10 + barguide.height/2)
+            .style("dominant-baseline", "middle")
+            .text("Overall term frequency");
+
+        d3.select("#" + barFreqsID).append("rect")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10 + barguide.height + 5)
+            .attr("height", barguide.height)
+            .attr("width", barguide.width/2)
+            .style("fill", color2)
+            .attr("opacity", 0.8);
+        d3.select("#" + barFreqsID).append("text")
+            .attr("x", barguide.width/2 + 5)
+            .attr("y", mdsheight + 10 + (3/2)*barguide.height + 5)
+            .style("dominant-baseline", "middle")
+            .text("Estimated term frequency within the selected topic");
+
+        // footnotes:
+        d3.select("#" + barFreqsID)
+            .append("a")
+            .attr("xlink:href", "http://vis.stanford.edu/files/2012-Termite-AVI.pdf")
+            .attr("target", "_blank")
+            .append("text")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10 + (6/2)*barguide.height + 5)
+            .style("dominant-baseline", "middle")
+            .text("1. saliency(term w) = frequency(w) * [sum_t p(t | w) * log(p(t | w)/p(t))] for topics t; ");
+        d3.select("#" + barFreqsID)
+            .append("a")
+            .attr("xlink:href", "http://nlp.stanford.edu/events/illvi2014/papers/sievert-illvi2014.pdf")
+            .attr("target", "_blank")
+            .append("text")
+            .attr("x", 0)
+            .attr("y", mdsheight + 10 + (8/2)*barguide.height + 5)
+            .style("dominant-baseline", "middle")
+            .text("2. relevance(term w | topic t) = λ * p(w | t) + (1 - λ) * p(w | t)/p(w); ");
+
+        // Bind 'default' data to 'default' bar chart
+        var basebars = chart.selectAll(to_select + " .bar-totals")
+                .data(barDefault2)
+                .enter();
+
+        // Draw the gray background bars defining the overall frequency of each word
+        basebars
+            .append("rect")
+            .attr("class", "bar-totals")
+            .attr("x", 0)
+            .attr("y", function(d) {
+                return y(d.Term);
+            })
+            .attr("height", y.rangeBand())
+            .attr("width", function(d) {
+                return x(d.Total);
+            })
+            .style("fill", color1)
+            .attr("opacity", 0.4);
+
+        // Add word labels to the side of each bar
+        basebars
+            .append("text")
+            .attr("x", -5)
+            .attr("class", "terms")
+            .attr("y", function(d) {
+                return y(d.Term) + 12;
+            })
+            .attr("cursor", "pointer")
+            .attr("id", function(d) {
+                return (termID + d.Term);
+            })
+            .style("text-anchor", "end") // right align text - use 'middle' for center alignment
+            .text(function(d) {
+                return d.Term;
+            })
+            .on("mouseover", function() {
+                term_hover(this);
+            })
+        // .on("click", function(d) {
+        //     var old_term = termID + vis_state.term;
+        //     if (vis_state.term != "" && old_term != this.id) {
+        //         term_off(document.getElementById(old_term));
+        //     }
+        //     vis_state.term = d.Term;
+        //     state_save(true);
+        //     term_on(this);
+        //     debugger;
+        // })
+            .on("mouseout", function() {
+                vis_state.term = "";
+                term_off(this);
+                state_save(true);
+            });
+
+        var title = chart.append("text")
+                .attr("x", barwidth/2)
+                .attr("y", -30)
+                .attr("class", "bubble-tool") //  set class so we can remove it when highlight_off is called
+                .style("text-anchor", "middle")
+                .style("font-size", "16px")
+                .text("Top-" + R + " Most Salient Terms");
+
+        title.append("tspan")
+            .attr("baseline-shift", "super")
+            .attr("font-size", "12px")
+            .text("(1)");
+
+        // barchart axis adapted from http://bl.ocks.org/mbostock/1166403
+        var xAxis = d3.svg.axis().scale(x)
+                .orient("top")
+                .tickSize(-barheight)
+                .tickSubdivide(true)
+                .ticks(6);
+
+        chart.attr("class", "xaxis")
+            .call(xAxis);
+
+        // dynamically create the topic and lambda input forms at the top of the page:
+        function init_forms(topicID, lambdaID, visID) {
+
+            // create container div for topic and lambda input:
+            var inputDiv = document.createElement("div");
+            inputDiv.setAttribute("id", topID);
+            inputDiv.setAttribute("style", "width: 1210px"); // to match the width of the main svg element
+            document.getElementById(visID).appendChild(inputDiv);
+
+            // topic input container:
+            var topicDiv = document.createElement("div");
+            topicDiv.setAttribute("style", "padding: 5px; background-color: #e8e8e8; display: inline-block; width: " + mdswidth + "px; height: 50px; float: left");
+            inputDiv.appendChild(topicDiv);
+
+            var topicLabel = document.createElement("label");
+            topicLabel.setAttribute("for", topicID);
+            topicLabel.setAttribute("style", "font-family: sans-serif; font-size: 14px");
+            topicLabel.innerHTML = "Selected Topic: <span id='" + topicID + "-value'></span>";
+            topicDiv.appendChild(topicLabel);
+
+            var topicInput = document.createElement("input");
+            topicInput.setAttribute("style", "width: 50px");
+            topicInput.type = "text";
+            topicInput.min = "0";
+            topicInput.max = K; // assumes the data has already been read in
+            topicInput.step = "1";
+            topicInput.value = "0"; // a value of 0 indicates no topic is selected
+            topicInput.id = topicID;
+            topicDiv.appendChild(topicInput);
+
+            var previous = document.createElement("button");
+            previous.setAttribute("id", topicDown);
+            previous.setAttribute("style", "margin-left: 5px");
+            previous.innerHTML = "Previous Topic";
+            topicDiv.appendChild(previous);
+
+            var next = document.createElement("button");
+            next.setAttribute("id", topicUp);
+            next.setAttribute("style", "margin-left: 5px");
+            next.innerHTML = "Next Topic";
+            topicDiv.appendChild(next);
+
+            var clear = document.createElement("button");
+            clear.setAttribute("id", topicClear);
+            clear.setAttribute("style", "margin-left: 5px");
+            clear.innerHTML = "Clear Topic";
+            topicDiv.appendChild(clear);
+
+            // lambda inputs
+            //var lambdaDivLeft = 8 + mdswidth + margin.left + termwidth;
+            var lambdaDivWidth = barwidth;
+            var lambdaDiv = document.createElement("div");
+            lambdaDiv.setAttribute("id", lambdaInputID);
+            lambdaDiv.setAttribute("style", "padding: 5px; background-color: #e8e8e8; display: inline-block; height: 50px; width: " + lambdaDivWidth + "px; float: right; margin-right: 30px");
+            inputDiv.appendChild(lambdaDiv);
+
+            var lambdaZero = document.createElement("div");
+            lambdaZero.setAttribute("style", "padding: 5px; height: 20px; width: 220px; font-family: sans-serif; float: left");
+            lambdaZero.setAttribute("id", lambdaZeroID);
+            lambdaDiv.appendChild(lambdaZero);
+            var xx = d3.select("#" + lambdaZeroID)
+                    .append("text")
+                    .attr("x", 0)
+                    .attr("y", 0)
+                    .style("font-size", "14px")
+                    .text("Slide to adjust relevance metric:");
+            var yy = d3.select("#" + lambdaZeroID)
+                    .append("text")
+                    .attr("x", 125)
+                    .attr("y", -5)
+                    .style("font-size", "10px")
+                    .style("position", "absolute")
+                    .text("(2)");
+
+            var sliderDiv = document.createElement("div");
+            sliderDiv.setAttribute("id", sliderDivID);
+            sliderDiv.setAttribute("style", "padding: 5px; height: 40px; width: 250px; float: right; margin-top: -5px; margin-right: 10px");
+            lambdaDiv.appendChild(sliderDiv);
+
+            var lambdaInput = document.createElement("input");
+            lambdaInput.setAttribute("style", "width: 250px; margin-left: 0px; margin-right: 0px");
+            lambdaInput.type = "range";
+            lambdaInput.min = 0;
+            lambdaInput.max = 1;
+            lambdaInput.step = data['lambda.step'];
+            lambdaInput.value = vis_state.lambda;
+            lambdaInput.id = lambdaID;
+            lambdaInput.setAttribute("list", "ticks"); // to enable automatic ticks (with no labels, see below)
+            sliderDiv.appendChild(lambdaInput);
+
+            var lambdaLabel = document.createElement("label");
+            lambdaLabel.setAttribute("id", lambdaLabelID);
+            lambdaLabel.setAttribute("for", lambdaID);
+            lambdaLabel.setAttribute("style", "height: 20px; width: 60px; font-family: sans-serif; font-size: 14px; margin-left: 80px");
+            lambdaLabel.innerHTML = "&#955 = <span id='" + lambdaID + "-value'>" + vis_state.lambda + "</span>";
+            lambdaDiv.appendChild(lambdaLabel);
+
+            // Create the svg to contain the slider scale:
+            var scaleContainer = d3.select("#" + sliderDivID).append("svg")
+                    .attr("width", 250)
+                    .attr("height", 25);
+
+            var sliderScale = d3.scale.linear()
+                    .domain([0, 1])
+                    .range([7.5, 242.5])  // trimmed by 7.5px on each side to match the input type=range slider:
+                    .nice();
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var sliderAxis = d3.svg.axis()
+                    .scale(sliderScale)
+                    .orient("bottom")
+                    .tickSize(10)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // group to contain the elements of the slider axis:
+            var sliderAxisGroup = scaleContainer.append("g")
+                    .attr("class", "slideraxis")
+                    .attr("margin-top", "-10px")
+                    .call(sliderAxis);
+
+            // Another strategy for tick marks on the slider; simpler, but not labels
+            // var sliderTicks = document.createElement("datalist");
+            // sliderTicks.setAttribute("id", "ticks");
+            // for (var tick = 0; tick <= 10; tick++) {
+            //     var tickOption = document.createElement("option");
+            //     //tickOption.value = tick/10;
+            //     tickOption.innerHTML = tick/10;
+            //     sliderTicks.appendChild(tickOption);
+            // }
+            // append the forms to the containers
+            //lambdaDiv.appendChild(sliderTicks);
+
+        }
+
+        // function to re-order the bars (gray and red), and terms:
+        function reorder_bars(increase) {
+            // grab the bar-chart data for this topic only:
+            var dat2 = lamData.filter(function(d) {
+                //return d.Category == "Topic" + Math.min(K, Math.max(0, vis_state.topic)) // fails for negative topic numbers...
+                return d.Category == "Topic" + vis_state.topic;
+            });
+            // define relevance:
+            for (var i = 0; i < dat2.length; i++) {
+                dat2[i].relevance = vis_state.lambda * dat2[i].logprob +
+                    (1 - vis_state.lambda) * dat2[i].loglift;
+            }
+
+            // sort by relevance:
+            dat2.sort(fancysort("relevance"));
+
+            // truncate to the top R tokens:
+            var dat3 = dat2.slice(0, R);
+
+            var y = d3.scale.ordinal()
+                    .domain(dat3.map(function(d) {
+                        return d.Term;
+                    }))
+                    .rangeRoundBands([0, barheight], 0.15);
+            var x = d3.scale.linear()
+                    .domain([1, d3.max(dat3, function(d) {
+                        return d.Total;
+                    })])
+                    .range([0, barwidth])
+                    .nice();
+
+            // Change Total Frequency bars
+            var graybars = d3.select("#" + barFreqsID)
+                    .selectAll(to_select + " .bar-totals")
+                    .data(dat3, function(d) {
+                        return d.Term;
+                    });
+
+            // Change word labels
+            var labels = d3.select("#" + barFreqsID)
+                    .selectAll(to_select + " .terms")
+                    .data(dat3, function(d) {
+                        return d.Term;
+                    });
+
+            // Create red bars (drawn over the gray ones) to signify the frequency under the selected topic
+            var redbars = d3.select("#" + barFreqsID)
+                    .selectAll(to_select + " .overlay")
+                    .data(dat3, function(d) {
+                        return d.Term;
+                    });
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var xAxis = d3.svg.axis().scale(x)
+                    .orient("top")
+                    .tickSize(-barheight)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // New axis definition:
+            var newaxis = d3.selectAll(to_select + " .xaxis");
+
+            // define the new elements to enter:
+            var graybarsEnter = graybars.enter().append("rect")
+                    .attr("class", "bar-totals")
+                    .attr("x", 0)
+                    .attr("y", function(d) {
+                        return y(d.Term) + barheight + margin.bottom + 2 * rMax;
+                    })
+                    .attr("height", y.rangeBand())
+                    .style("fill", color1)
+                    .attr("opacity", 0.4);
+
+            var labelsEnter = labels.enter()
+                    .append("text")
+                    .attr("x", -5)
+                    .attr("class", "terms")
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12 + barheight + margin.bottom + 2 * rMax;
+                    })
+                    .attr("cursor", "pointer")
+                    .style("text-anchor", "end")
+                    .attr("id", function(d) {
+                        return (termID + d.Term);
+                    })
+                    .text(function(d) {
+                        return d.Term;
+                    })
+                    .on("mouseover", function() {
+                        term_hover(this);
+                    })
+            // .on("click", function(d) {
+            //     var old_term = termID + vis_state.term;
+            //     if (vis_state.term != "" && old_term != this.id) {
+            //     term_off(document.getElementById(old_term));
+            //     }
+            //     vis_state.term = d.Term;
+            //     state_save(true);
+            //     term_on(this);
+            // })
+                    .on("mouseout", function() {
+                        vis_state.term = "";
+                        term_off(this);
+                        state_save(true);
+                    });
+
+            var redbarsEnter = redbars.enter().append("rect")
+                    .attr("class", "overlay")
+                    .attr("x", 0)
+                    .attr("y", function(d) {
+                        return y(d.Term) + barheight + margin.bottom + 2 * rMax;
+                    })
+                    .attr("height", y.rangeBand())
+                    .style("fill", color2)
+                    .attr("opacity", 0.8);
+
+
+            if (increase) {
+                graybarsEnter
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    })
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+                labelsEnter
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbarsEnter
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    })
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+
+                graybars.transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+                labels.transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbars.transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    });
+
+                // Transition exiting rectangles to the bottom of the barchart:
+                graybars.exit()
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18;
+                    })
+                    .remove();
+                labels.exit()
+                    .transition().duration(duration)
+                    .delay(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 18 + i * 18;
+                    })
+                    .remove();
+                redbars.exit()
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    })
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18;
+                    })
+                    .remove();
+                // https://github.com/mbostock/d3/wiki/Transitions#wiki-d3_ease
+                newaxis.transition().duration(duration)
+                    .call(xAxis)
+                    .transition().duration(duration);
+            } else {
+                graybarsEnter
+                    .attr("width", 100) // FIXME by looking up old width of these bars
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    });
+                labelsEnter
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbarsEnter
+                    .attr("width", 50) // FIXME by looking up old width of these bars
+                    .transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    });
+
+                graybars.transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Total);
+                    });
+                labels.transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term) + 12;
+                    });
+                redbars.transition().duration(duration)
+                    .attr("y", function(d) {
+                        return y(d.Term);
+                    })
+                    .transition().duration(duration)
+                    .attr("width", function(d) {
+                        return x(d.Freq);
+                    });
+
+                // Transition exiting rectangles to the bottom of the barchart:
+                graybars.exit()
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18 + 2 * rMax;
+                    })
+                    .remove();
+                labels.exit()
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 18 + i * 18 + 2 * rMax;
+                    })
+                    .remove();
+                redbars.exit()
+                    .transition().duration(duration)
+                    .attr("y", function(d, i) {
+                        return barheight + margin.bottom + 6 + i * 18 + 2 * rMax;
+                    })
+                    .remove();
+
+                // https://github.com/mbostock/d3/wiki/Transitions#wiki-d3_ease
+                newaxis.transition().duration(duration)
+                    .transition().duration(duration)
+                    .call(xAxis);
+            }
+        }
+
+        //////////////////////////////////////////////////////////////////////////////
+
+        // function to update bar chart when a topic is selected
+        // the circle argument should be the appropriate circle element
+        function topic_on(circle) {
+            if (circle == null) return null;
+
+            // grab data bound to this element
+            var d = circle.__data__;
+            var Freq = Math.round(d.Freq * 10) / 10,
+                topics = d.topics;
+
+            // change opacity and fill of the selected circle
+            circle.style.opacity = highlight_opacity;
+            circle.style.fill = color2;
+
+            // Remove 'old' bar chart title
+            var text = d3.select(to_select + " .bubble-tool");
+            text.remove();
+
+            // append text with info relevant to topic of interest
+            d3.select("#" + barFreqsID)
+                .append("text")
+                .attr("x", barwidth/2)
+                .attr("y", -30)
+                .attr("class", "bubble-tool") //  set class so we can remove it when highlight_off is called
+                .style("text-anchor", "middle")
+                .style("font-size", "16px")
+                .text("Top-" + R + " Most Relevant Terms for Topic " + topics + " (" + Freq + "% of tokens)");
+
+            // grab the bar-chart data for this topic only:
+            var dat2 = lamData.filter(function(d) {
+                return d.Category == "Topic" + topics;
+            });
+
+            // define relevance:
+            for (var i = 0; i < dat2.length; i++) {
+                dat2[i].relevance = lambda.current * dat2[i].logprob +
+                    (1 - lambda.current) * dat2[i].loglift;
+            }
+
+            // sort by relevance:
+            dat2.sort(fancysort("relevance"));
+
+            // truncate to the top R tokens:
+            var dat3 = dat2.slice(0, R);
+
+            // scale the bars to the top R terms:
+            var y = d3.scale.ordinal()
+                    .domain(dat3.map(function(d) {
+                        return d.Term;
+                    }))
+                    .rangeRoundBands([0, barheight], 0.15);
+            var x = d3.scale.linear()
+                    .domain([1, d3.max(dat3, function(d) {
+                        return d.Total;
+                    })])
+                    .range([0, barwidth])
+                    .nice();
+
+            // remove the red bars if there are any:
+            d3.selectAll(to_select + " .overlay").remove();
+
+            // Change Total Frequency bars
+            d3.selectAll(to_select + " .bar-totals")
+                .data(dat3)
+                .attr("x", 0)
+                .attr("y", function(d) {
+                    return y(d.Term);
+                })
+                .attr("height", y.rangeBand())
+                .attr("width", function(d) {
+                    return x(d.Total);
+                })
+                .style("fill", color1)
+                .attr("opacity", 0.4);
+
+            // Change word labels
+            d3.selectAll(to_select + " .terms")
+                .data(dat3)
+                .attr("x", -5)
+                .attr("y", function(d) {
+                    return y(d.Term) + 12;
+                })
+                .attr("id", function(d) {
+                    return (termID + d.Term);
+                })
+                .style("text-anchor", "end") // right align text - use 'middle' for center alignment
+                .text(function(d) {
+                    return d.Term;
+                });
+
+            // Create red bars (drawn over the gray ones) to signify the frequency under the selected topic
+            d3.select("#" + barFreqsID).selectAll(to_select + " .overlay")
+                .data(dat3)
+                .enter()
+                .append("rect")
+                .attr("class", "overlay")
+                .attr("x", 0)
+                .attr("y", function(d) {
+                    return y(d.Term);
+                })
+                .attr("height", y.rangeBand())
+                .attr("width", function(d) {
+                    return x(d.Freq);
+                })
+                .style("fill", color2)
+                .attr("opacity", 0.8);
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var xAxis = d3.svg.axis().scale(x)
+                    .orient("top")
+                    .tickSize(-barheight)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // redraw x-axis
+            d3.selectAll(to_select + " .xaxis")
+            //.attr("class", "xaxis")
+                .call(xAxis);
+        }
+
+
+        function topic_off(circle) {
+            if (circle == null) return circle;
+            // go back to original opacity/fill
+            circle.style.opacity = base_opacity;
+            circle.style.fill = color1;
+
+            var title = d3.selectAll(to_select + " .bubble-tool")
+                    .text("Top-" + R + " Most Salient Terms");
+            title.append("tspan")
+                .attr("baseline-shift", "super")
+                .attr("font-size", 12)
+                .text(1);
+
+            // remove the red bars
+            d3.selectAll(to_select + " .overlay").remove();
+
+            // go back to 'default' bar chart
+            var dat2 = lamData.filter(function(d) {
+                return d.Category == "Default";
+            });
+
+            var y = d3.scale.ordinal()
+                    .domain(dat2.map(function(d) {
+                        return d.Term;
+                    }))
+                    .rangeRoundBands([0, barheight], 0.15);
+            var x = d3.scale.linear()
+                    .domain([1, d3.max(dat2, function(d) {
+                        return d.Total;
+                    })])
+                    .range([0, barwidth])
+                    .nice();
+
+            // Change Total Frequency bars
+            d3.selectAll(to_select + " .bar-totals")
+                .data(dat2)
+                .attr("x", 0)
+                .attr("y", function(d) {
+                    return y(d.Term);
+                })
+                .attr("height", y.rangeBand())
+                .attr("width", function(d) {
+                    return x(d.Total);
+                })
+                .style("fill", color1)
+                .attr("opacity", 0.4);
+
+            //Change word labels
+            d3.selectAll(to_select + " .terms")
+                .data(dat2)
+                .attr("x", -5)
+                .attr("y", function(d) {
+                    return y(d.Term) + 12;
+                })
+                .style("text-anchor", "end") // right align text - use 'middle' for center alignment
+                .text(function(d) {
+                    return d.Term;
+                });
+
+            // adapted from http://bl.ocks.org/mbostock/1166403
+            var xAxis = d3.svg.axis().scale(x)
+                    .orient("top")
+                    .tickSize(-barheight)
+                    .tickSubdivide(true)
+                    .ticks(6);
+
+            // redraw x-axis
+            d3.selectAll(to_select + " .xaxis")
+                .attr("class", "xaxis")
+                .call(xAxis);
+        }
+
+        // event definition for mousing over a term
+        function term_hover(term) {
+            var old_term = termID + vis_state.term;
+            if (vis_state.term != "" && old_term != term.id) {
+                term_off(document.getElementById(old_term));
+            }
+            vis_state.term = term.innerHTML;
+            term_on(term);
+            state_save(true);
+        }
+        // updates vis when a term is selected via click or hover
+        function term_on(term) {
+            if (term == null) return null;
+            term.style["fontWeight"] = "bold";
+            var d = term.__data__;
+            var Term = d.Term;
+            var dat2 = mdsData3.filter(function(d2) {
+                return d2.Term == Term;
+            });
+
+            var k = dat2.length; // number of topics for this token with non-zero frequency
+
+            var radius = [];
+            for (var i = 0; i < K; ++i) {
+                radius[i] = 0;
+            }
+            for (i = 0; i < k; i++) {
+                radius[dat2[i].Topic - 1] = dat2[i].Freq;
+            }
+
+            var size = [];
+            for (var i = 0; i < K; ++i) {
+                size[i] = 0;
+            }
+            for (i = 0; i < k; i++) {
+                // If we want to also re-size the topic number labels, do it here
+                // 11 is the default, so leaving this as 11 won't change anything.
+                size[dat2[i].Topic - 1] = 11;
+            }
+
+            var rScaleCond = d3.scale.sqrt()
+                    .domain([0, 1]).range([0, rMax]);
+
+            // Change size of bubbles according to the word's distribution over topics
+            d3.selectAll(to_select + " .dot")
+                .data(radius)
+                .transition()
+                .attr("r", function(d) {
+                    //return (rScaleCond(d));
+                    return (Math.sqrt(d*mdswidth*mdsheight*word_prop/Math.PI));
+                });
+
+            // re-bind mdsData so we can handle multiple selection
+            d3.selectAll(to_select + " .dot")
+                .data(mdsData);
+
+            // Change sizes of topic numbers:
+            d3.selectAll(to_select + " .txt")
+                .data(size)
+                .transition()
+                .style("font-size", function(d) {
+                    return +d;
+                });
+
+            // Alter the guide
+            d3.select(to_select + " .circleGuideTitle")
+                .text("Conditional topic distribution given term = '" + term.innerHTML + "'");
+        }
+
+        function term_off(term) {
+            if (term == null) return null;
+            term.style["fontWeight"] = "normal";
+
+            d3.selectAll(to_select + " .dot")
+                .data(mdsData)
+                .transition()
+                .attr("r", function(d) {
+                    //return (rScaleMargin(+d.Freq));
+                    return (Math.sqrt((d.Freq/100)*mdswidth*mdsheight*circle_prop/Math.PI));
+                });
+
+            // Change sizes of topic numbers:
+            d3.selectAll(to_select + " .txt")
+                .transition()
+                .style("font-size", "12px");
+
+            // Go back to the default guide
+            d3.select(to_select + " .circleGuideTitle")
+                .text("Marginal topic distribution");
+            d3.select(to_select + " .circleGuideLabelLarge")
+                .text(defaultLabelLarge);
+            d3.select(to_select + " .circleGuideLabelSmall")
+                .attr("y", mdsheight + 2 * newSmall)
+                .text(defaultLabelSmall);
+            d3.select(to_select + " .circleGuideSmall")
+                .attr("r", newSmall)
+                .attr("cy", mdsheight + newSmall);
+            d3.select(to_select + " .lineGuideSmall")
+                .attr("y1", mdsheight + 2 * newSmall)
+                .attr("y2", mdsheight + 2 * newSmall);
+        }
+
+
+        // serialize the visualization state using fragment identifiers -- http://en.wikipedia.org/wiki/Fragment_identifier
+        // location.hash holds the address information
+
+        var params = location.hash.split("&");
+        if (params.length > 1) {
+            vis_state.topic = params[0].split("=")[1];
+            vis_state.lambda = params[1].split("=")[1];
+            vis_state.term = params[2].split("=")[1];
+
+            // Idea: write a function to parse the URL string
+            // only accept values in [0,1] for lambda, {0, 1, ..., K} for topics (any string is OK for term)
+            // Allow for subsets of the three to be entered:
+            // (1) topic only (lambda = 1 term = "")
+            // (2) lambda only (topic = 0 term = "") visually the same but upon hovering a topic, the effect of lambda will be seen
+            // (3) term only (topic = 0 lambda = 1) only fires when the term is among the R most salient
+            // (4) topic + lambda (term = "")
+            // (5) topic + term (lambda = 1)
+            // (6) lambda + term (topic = 0) visually lambda doesn't make a difference unless a topic is hovered
+            // (7) topic + lambda + term
+
+            // Short-term: assume format of "#topic=k&lambda=l&term=s" where k, l, and s are strings (b/c they're from a URL)
+
+            // Force k (topic identifier) to be an integer between 0 and K:
+            vis_state.topic = Math.round(Math.min(K, Math.max(0, vis_state.topic)));
+
+            // Force l (lambda identifier) to be in [0, 1]:
+            vis_state.lambda = Math.min(1, Math.max(0, vis_state.lambda));
+
+            // impose the value of lambda:
+            document.getElementById(lambdaID).value = vis_state.lambda;
+            document.getElementById(lambdaID + "-value").innerHTML = vis_state.lambda;
+
+            // select the topic and transition the order of the bars (if approporiate)
+            if (!isNaN(vis_state.topic)) {
+                document.getElementById(topicID).value = vis_state.topic;
+                if (vis_state.topic > 0) {
+                    topic_on(document.getElementById(topicID + vis_state.topic));
+                }
+                if (vis_state.lambda < 1 && vis_state.topic > 0) {
+                    reorder_bars(false);
+                }
+            }
+            lambda.current = vis_state.lambda;
+            var termElem = document.getElementById(termID + vis_state.term);
+            if (termElem !== undefined) term_on(termElem);
+        }
+
+        function state_url() {
+            return location.origin + location.pathname + "#topic=" + vis_state.topic +
+                "&lambda=" + vis_state.lambda + "&term=" + vis_state.term;
+        }
+
+        function state_save(replace) {
+            if (replace)
+                history.replaceState(vis_state, "Query", state_url());
+            else
+                history.pushState(vis_state, "Query", state_url());
+        }
+
+        function state_reset() {
+            if (vis_state.topic > 0) {
+                topic_off(document.getElementById(topicID + vis_state.topic));
+            }
+            if (vis_state.term != "") {
+                term_off(document.getElementById(termID + vis_state.term));
+            }
+            vis_state.term = "";
+            document.getElementById(topicID).value = vis_state.topic = 0;
+            state_save(true);
+        }
+
+    }
+
+    if (typeof data_or_file_name === 'string')
+        d3.json(data_or_file_name, function(error, data) {visualize(data);});
+    else
+        visualize(data_or_file_name);
+
+    // var current_clicked = {
+    //     what: "nothing",
+    //     element: undefined
+    // },
+
+    //debugger;
+
+};
+
+var ldavis_el1432891397175660861444859021390_data = {"mdsDat": {"Freq": [42.10795965974717, 30.656110790411713, 9.413677345930058, 7.722448288439587, 2.8757133495028677, 2.6750003418610646, 2.4807377522975895, 0.9551296477484628, 0.8496894395637401, 0.26353338449773706], "cluster": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1], "topics": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "x": [-125.13433837890625, -94.30562591552734, 0.2788046896457672, -172.2128448486328, 114.65235137939453, -42.23631286621094, 31.757883071899414, 161.73239135742188, -10.759868621826172, 83.82967376708984], "y": [119.85868835449219, -91.70872497558594, 158.4375457763672, -2.6163768768310547, -136.95819091796875, 31.077125549316406, -48.17319869995117, -14.482991218566895, -175.537109375, 74.61402893066406], "topic.names": ["next week", "bandwidth transaction", "unit price", "financial gtc", "counterparty name", "confidentiality agreement", "forwarded mark", "isda master", "master agreement", "legal taylor"]}, "tinfo": {"Category": ["Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Default", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic1", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic2", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic3", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic4", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic5", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic6", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic7", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic8", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic9", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10", "Topic10"], "Freq": [31.0, 92.0, 29.0, 51.0, 57.0, 24.0, 113.0, 166.0, 19.0, 40.0, 20.0, 27.0, 32.0, 95.0, 46.0, 46.0, 23.0, 26.0, 20.0, 15.0, 8.0, 26.0, 32.0, 15.0, 20.0, 101.0, 16.0, 22.0, 48.0, 18.0, 19.57189199742297, 17.513610653589797, 14.956178660323006, 16.401855771271862, 13.660740622798496, 12.657030704583022, 55.443738853348215, 14.298079188350947, 11.40675468814669, 12.335090277351048, 13.727941537967562, 17.433240953624374, 10.14719249913206, 11.01669684954154, 9.72041220653637, 11.254457043469808, 28.183513447446202, 9.858659464318167, 8.313271449209353, 18.332291502373455, 7.686970097646285, 7.673080639493601, 7.683745900282559, 7.681138360624637, 15.070087240616866, 7.509942043969703, 9.882554045283674, 7.051694849841756, 6.994259438372575, 7.499825111029659, 14.826508372892741, 11.304313433380798, 23.227842423187397, 19.183904105269317, 21.783555731781934, 74.09607921624618, 31.416262113103947, 39.663707522602905, 14.099445054193337, 112.8482809738151, 19.29070901812642, 22.68634136389365, 15.059145585931876, 59.21884046551364, 63.378173691475276, 88.87380095366325, 21.531283583291973, 20.19499701733232, 46.33281076028387, 21.651100177642572, 42.24244406437176, 19.345178429657974, 27.219185390898794, 27.095082857320108, 35.9392301524192, 18.330582090534108, 21.06284846260756, 20.118306681963112, 22.288671945806236, 16.883331306978835, 17.101645751055315, 15.035321563112548, 13.200435304205493, 17.293194921878737, 13.218082912420376, 26.386681258621763, 21.19342297593687, 15.120442227865338, 17.841750513474196, 23.39582098348206, 8.932868207317478, 8.837357007374646, 10.02322055841045, 8.762356640106654, 8.90725577837703, 6.740328718330959, 9.090761564429489, 6.739520854486418, 18.98945799647225, 7.204635749941467, 6.701216207825883, 6.669276872118994, 5.577375280552569, 5.508986497126107, 5.48262264138553, 8.816985982084523, 27.805948503196007, 6.7459309317704585, 20.913743358577253, 18.959053620185696, 72.17283228033388, 35.95272621064389, 30.680580202364183, 13.36129345265534, 34.3922354518055, 27.092910512834976, 30.83652157634472, 56.79693017942246, 60.374944238962044, 31.25413472317152, 81.00961950146392, 15.262830663262713, 43.46714379504809, 19.970192268853555, 26.403140481301204, 38.77605559803473, 40.89496382956679, 28.262333829441975, 20.653845849834724, 19.176382811810445, 19.2251460199862, 27.927678699681707, 18.031175308494227, 11.462802506184758, 10.02514708023129, 7.791972727175614, 4.716181664626793, 4.27542146819985, 3.829877929014053, 3.8267945876726563, 4.214948456466811, 3.8119877997319147, 3.8402073625169306, 3.8419529745871066, 3.870346064324138, 3.8160636460005244, 3.8443137321390135, 3.3657615972669266, 3.350926694401236, 2.9433447856011163, 2.89113272204303, 2.4738962894923207, 2.458176554377509, 2.4632104590553308, 4.282219196869673, 4.264457188389221, 3.791900149690684, 2.0413776628229963, 3.8084081164473993, 3.803055995604531, 10.953542966943386, 11.812290979050266, 10.003012735417954, 10.695568487272201, 3.3472274490719967, 5.636213918427072, 5.598596071384189, 3.831776186831608, 5.642314494605574, 6.054307926519906, 4.734806473235723, 4.256315435152716, 4.7443987019983, 5.124219375767682, 4.281963832250158, 4.737975918255765, 4.362157751572346, 3.862187228577716, 3.8657203228542114, 26.08802581800685, 5.687096859497746, 5.62178636704431, 11.600306769430853, 4.607539169904263, 6.182507980013442, 7.955227399646199, 4.622699328309368, 2.902159765056184, 2.402786743478348, 7.1870145347137315, 4.229018977178259, 2.3245464749770046, 3.0385991098379557, 9.914807343559652, 1.7564644798078288, 2.3832741636278127, 1.7592986744253847, 4.472493039353533, 1.2999483231249738, 1.271232273731574, 1.244947749564272, 1.2735942070211919, 2.3672828817193525, 1.2602298856121472, 1.26932353213361, 1.2705360369307266, 1.2684523812409445, 1.2637479021015792, 1.276765681840867, 10.016251097525405, 2.103289684537473, 10.772103830360807, 3.495744446258723, 2.601914414738009, 2.2470513922324127, 6.855959707323706, 10.801975358017915, 15.681068753758954, 5.669117831628484, 8.02932442406616, 2.956247978451561, 5.59921686202159, 3.7727503094859745, 9.450379921356186, 7.426386333892817, 6.2400369604932635, 10.309745815073514, 9.949823400271606, 8.599836403164412, 7.180351156906602, 3.9833088538315646, 4.805122084650695, 5.94422338526225, 4.689049985605802, 4.644902014742181, 7.602327639925401, 2.588444864771043, 2.587641100283279, 1.7522100759925245, 1.7669409500473603, 1.737809087061045, 2.8058439694714554, 1.7596948167166528, 0.9180090856597283, 0.9145108789695338, 0.9188058911385539, 0.9238181226504592, 0.9351022206218264, 0.9348741860697303, 1.0249806322750823, 0.9193947923420037, 0.919616127899971, 0.9267993773566761, 0.9171738913620768, 3.4291138408120596, 0.9235906769631299, 0.9210438526895772, 0.9306128487051505, 2.5816450978636825, 1.7500057390765256, 0.9254148163824817, 0.5842422788585754, 1.7555271630564169, 1.761668853945529, 0.9203279676779753, 5.925786829317204, 1.7608500937228455, 4.37834786150606, 2.5941667744016756, 2.5945374291174272, 1.7688327463991356, 4.332261304493263, 1.7514484223761713, 3.5705450651875177, 2.595460099588621, 1.7474676186049325, 1.9147959068795841, 1.0873727380190177, 1.119338803917484, 1.2528424901274149, 1.1494525693116961, 1.103070554911826, 1.899522073896504, 1.721197635181036, 1.5508013652680468, 0.8310865629979458, 1.9678015025594027, 0.9637377223619661, 0.634427781208092, 0.47595116321869974, 0.47835737144985563, 0.45874916689162953, 0.4766523965351675, 0.472935282528005, 0.475286647860414, 0.4657999377158448, 0.45510250633457805, 0.4698245392630654, 0.45811790047169126, 0.4576660750304079, 0.45295777241782037, 0.45745953903740194, 0.458463449167812, 0.6194217594766963, 0.6144987040098938, 0.43345447396728887, 0.43562790804710416, 0.47875039854604395, 0.4663944125996125, 0.2918692207194577, 0.29160267057861583, 0.29113863791860484, 0.566176708166327, 0.6513965325416956, 1.3759911151689832, 1.6616923390773246, 1.0281875641912017, 0.6390041890290682, 1.0819945097351789, 0.652219915931912, 1.1473194411813166, 0.7902996781953472, 0.6752847896018179, 0.4966305239724562, 0.4851053199233403, 0.46868017942076184, 3.4599939811611495, 2.869993832620297, 2.6317406879781315, 2.873549955133012, 1.3321083560273033, 1.3181285837198076, 0.8620846984479519, 0.8544235817095815, 0.7102535711072582, 0.7085482361898009, 0.7142100422484213, 0.7055743413838643, 0.7165546884732538, 0.7085552484580776, 0.7094717910147903, 0.7004742513691701, 0.7181496405389949, 0.7010431183099856, 0.7001005813846953, 0.7018776993907294, 0.7112153303763438, 0.7012115467713794, 1.9483308403239687, 0.7106884457337224, 0.6819217294597812, 0.6884228701419743, 0.6744306308674209, 0.7024102868109188, 0.66701868198504, 0.8561025600325906, 2.248897032178367, 1.6402937436535094, 1.3265671589355639, 1.9524771239185665, 2.254242205062997, 0.8635890133888862, 1.1186976686876593, 0.7996415574741736, 0.7505180183975884, 0.9155184982287776, 0.8754042406103083, 0.9050513388840387, 0.9755345943000278, 0.7893906499918854, 0.8856113055305106, 0.8562999914776391, 0.8028984687682706, 0.754597302352928, 0.737443120318275, 0.7225608368659303, 0.44755458240123186, 0.32399601744374795, 0.24958381298040774, 0.24799890097731095, 0.18316327342129646, 0.19000201303705128, 0.18159094405526044, 0.17973664362871786, 0.17778736331039516, 0.18200857881656984, 0.11792061064352893, 0.175370487524297, 0.11581628687828195, 0.113342590169177, 0.1145160216638267, 0.11151844732123473, 0.10975942627948478, 0.10894702010539921, 0.11306814215040667, 0.1105008172680156, 0.10914883672531453, 0.10673466249130908, 0.1106442063776267, 0.1070446028836027, 0.10781069752935542, 0.10702705232783498, 0.10448152639901179, 0.1095667167924624, 0.1057978572508376, 0.10237550988420276, 0.22189251947993943, 0.10747978641529826, 0.11187503597151284, 0.16341047929906521, 0.20814969466303046, 0.14701627996242825, 0.11186568458120554, 0.11873361223273983, 0.11746080892985783, 0.13177748148630963, 0.1317120477289044, 0.12643855811042515, 0.11592159946625018, 0.4886684669056579, 0.896270611511619, 0.31207716245603245, 0.30714984519903316, 0.31064553446848553, 0.24129587825123722, 0.17456365344025157, 0.16940384787167298, 0.1707315022361753, 0.42977326142122196, 0.16382948405345565, 0.37546759809607877, 0.3293390137045908, 0.10811964990771208, 0.10340246038235038, 0.10576262858870816, 0.10281759910816178, 0.10485164951102888, 0.10436074527726057, 0.10306427010993623, 0.10269217352763237, 0.10345464985121082, 0.09908679167795142, 0.09003433243488983, 0.07917607635120348, 0.1021322885722129, 0.10167262355761589, 0.10286453843614472, 0.1024552242995718, 0.10519558241174859, 0.17152436583437175, 0.38703061424426904, 0.35519930834195257, 0.2366719091767429, 0.3352115350973414, 0.2516808959360115, 0.1710858497073486, 0.10746754796656426, 0.11044679071379473, 0.10682061769752517, 0.11078071446010639, 0.11217132912072741, 0.10943207479205619, 0.10776904339387543, 0.1059797679291225, 0.05210323327669127, 0.03381798018240296, 0.03239715912391087, 0.03295938591022032, 0.03211032264140427, 0.030946708603182202, 0.03153513779112173, 0.031482107431808244, 0.032778826207394536, 0.029801988373205992, 0.02923570098215436, 0.014157614436609647, 0.013313895078394273, 0.014072947851255093, 0.014286373620670994, 0.013147962399323233, 0.013191294080898001, 0.013246829220640684, 0.013345433745363447, 0.014118547801419652, 0.013258363489168368, 0.01372715729285784, 0.012423273470824779, 0.014105900291178914, 0.013325609095365006, 0.012940513258543392, 0.013119083120161754, 0.0132646248237427, 0.012443081374598099, 0.013065957731062852, 0.012920574637756548, 0.058042048237680006, 0.01371656057045948, 0.013619707518167443, 0.013359086203347992, 0.014077470125663342, 0.028441990048285876, 0.013770017026452107, 0.03409394779182698, 0.025651140476693292, 0.015594939362229391, 0.014520435451314755, 0.018267039172983352, 0.014315696898146223, 0.014341107402790272, 0.014367841323143747, 0.014279218112956382, 0.01687708404842836, 0.015139515983671982, 0.018706998208759706, 0.022722308239225664, 0.01856284647767443, 0.01634968743990302, 0.0157622530893181, 0.021944192693592796, 0.01576318672870564, 0.014935136894263425, 0.016605801588027075, 0.015494219975517228, 0.016278928859377744, 0.016246519331070058, 0.017622517714751925, 0.01636476216431739, 0.016122576149240862, 0.016163820850662335, 0.015997002938787152], "Term": ["gtcs", "legal", "bandwidth", "financial", "counterparty", "product", "enron", "ect", "price", "doc", "counterparties", "swap", "ena", "agreement", "credit", "isda", "management", "canada", "number", "language", "column", "transaction", "review", "tomorrow", "revised", "trading", "gtc", "long", "tana", "date", "futures", "sheri", "argentina", "cargill", "loi", "merchants", "eol", "gas", "argentine", "japan", "hedge", "nymex", "treasury", "ferrous", "houstonstreet", "applications", "power", "approvals", "davis", "gcp", "lorraine", "lees", "becker", "lisa", "actively", "divisions", "response", "mexico", "city", "samuel", "site", "mentioned", "form", "global", "traded", "legal", "deal", "tana", "internet", "ect", "jones", "customer", "frank", "hou", "forwarded", "mark", "products", "information", "taylor", "review", "trading", "contracts", "trade", "counterparty", "enron", "enrononline", "isda", "agreement", "guidelines", "aquila", "nova", "scotia", "ashland", "cindy", "omnet", "bank", "risk", "cemex", "file", "rmt", "fees", "rhett", "counsel", "evangelista", "assignment", "chemicals", "masters", "bad", "signed", "certificate", "usa", "burns", "diligence", "rex", "dow", "jackson", "confidentiality", "singapore", "company", "management", "agreement", "agreements", "doc", "member", "attached", "send", "master", "trading", "enron", "corp", "mark", "transactions", "taylor", "online", "financial", "forwarded", "ect", "hou", "credit", "isda", "trade", "bandwidth", "price", "unit", "units", "quoted", "dso", "quantity", "est", "npa", "formula", "pooling", "miles", "nxx", "los", "clli", "angeles", "mile", "defined", "dsos", "measure", "buyer", "quote", "sell", "submitted", "leonardo", "effective", "july", "volume", "descriptions", "date", "number", "long", "transaction", "pacheco", "month", "description", "suite", "termination", "product", "point", "term", "gtc", "enrononline", "website", "products", "counterparty", "york", "market", "gtcs", "inserted", "hdd", "language", "isdas", "deemed", "version", "currency", "corbally", "waste", "weather", "arbitration", "domestic", "courts", "gtc", "juries", "managment", "avoid", "blumenthal", "dealers", "familiar", "loaded", "guru", "reason", "banks", "tend", "effectively", "precedence", "boys", "necessarily", "revised", "info", "swap", "rate", "addition", "kitchen", "canadian", "ena", "financial", "jeff", "canada", "michael", "tax", "deals", "credit", "doc", "online", "enron", "ect", "forwarded", "hou", "capital", "isda", "mark", "corp", "trade", "column", "incorporation", "versus", "tab", "dunnes", "columns", "matrix", "groups", "split", "consists", "table", "remain", "indicating", "headquarters", "expiration", "placing", "detailed", "perform", "loading", "types", "intersection", "blank", "tabs", "country", "suggested", "responsibility", "sessions", "august", "commercial", "needed", "product", "europe", "counterparties", "type", "entity", "link", "counterparty", "completed", "legal", "enron", "review", "ect", "schedule", "physical", "mark", "trading", "taylor", "paso", "merchant", "merger", "feedback", "cash", "perfection", "gtys", "circumstance", "gateway", "involving", "govern", "reports", "raised", "measurement", "item", "involvement", "critical", "staff", "walton", "instructions", "sheila", "distributed", "delaware", "veronica", "partnership", "hold", "rohauer", "uncertainty", "indicators", "skills", "sounds", "court", "collateral", "energy", "law", "agree", "canadian", "yesterday", "counterparty", "mail", "interest", "systems", "ndas", "carol", "test", "antonio", "aquilia", "san", "cab", "catch", "conflicts", "lobby", "ride", "wild", "hotel", "fogata", "rsvpd", "slot", "cabs", "reservations", "canceled", "lost", "restaurant", "vance", "dress", "meaning", "dinner", "wednesdays", "southwest", "arts", "club", "scheduling", "settlements", "effort", "group", "meeting", "meetings", "message", "tomorrow", "phone", "swap", "meet", "secondment", "office", "morning", "time", "tana", "robert", "jones", "number", "back", "members", "ill", "due", "deutsche", "clare", "funb", "tanna", "guarantees", "allen", "partners", "solicitors", "finalisation", "overy", "delene", "enroncredit", "travella", "relates", "outstanding", "posted", "professional", "telephoning", "sachs", "timing", "stand", "dependent", "goldman", "godson", "qualifications", "understood", "registered", "finalise", "commencing", "inspection", "negotiation", "recipient", "finalised", "update", "documentation", "schedule", "foreign", "helpful", "kind", "long", "bank", "isda", "purpose", "select", "performance", "reviewer", "selection", "series", "euromoney", "courses", "workshop", "jane", "reviewers", "mid", "remember", "reviews", "workshops", "speaking", "focusing", "shame", "mcbride", "years", "pli", "worthwhile", "eurocurrency", "nyc", "minutes", "contribute", "months", "ago", "benefit", "aware", "aronowitz", "offered", "system", "management", "documentation", "isda", "master", "london", "real", "days", "offering", "commodity", "credit", "good", "documents", "derivatives", "taffy", "brenda", "consideration", "planning", "conflict", "milligan", "creates", "whitehead", "notify", "advised", "coverage", "courses", "speaking", "conduct", "urgently", "pli", "worthwhile", "telephoning", "posted", "pledgor", "arrive", "defer", "workshops", "selection", "estate", "flight", "wireless", "dealsinvoices", "inspection", "coms", "wogel", "vacation", "extra", "equivalent", "heavy", "funb", "arrange", "south", "request", "desk", "mccullough", "differ", "subsidiary", "venezuela", "vastar", "sport", "commissioned", "citibank", "established", "receive", "isda", "group", "contacts", "jedi", "legal", "jurisdictions", "clean", "good", "question", "approval", "call", "mark", "online", "week", "corp", "forwarded"], "Total": [31.0, 92.0, 29.0, 51.0, 57.0, 24.0, 113.0, 166.0, 19.0, 40.0, 20.0, 27.0, 32.0, 95.0, 46.0, 46.0, 23.0, 26.0, 20.0, 15.0, 8.0, 26.0, 32.0, 15.0, 20.0, 101.0, 16.0, 22.0, 48.0, 18.0, 20.68163661361309, 18.538292137195473, 15.984311834343583, 17.55063270949558, 14.743566628218382, 13.710892966084515, 60.14051792477677, 15.566237360359265, 12.438566274342513, 13.458482027945808, 15.075745290484054, 19.234245634634302, 11.212905827388518, 12.197571539338291, 10.841672376608281, 12.57001646554055, 31.498247509475405, 11.025068486673645, 9.316713623671914, 20.55917042085034, 8.698812203834999, 8.708865727062648, 8.724172479803345, 8.724203709043826, 17.16428058903849, 8.617812892380625, 11.341808429486548, 8.101807473355738, 8.03903576098236, 8.63922965637203, 17.0936768171943, 13.052582761752479, 27.215828783762433, 22.629476190345255, 25.807305429174214, 92.71483025081842, 38.09335342207858, 48.74183429506811, 16.749770552082527, 166.47761324387093, 24.078344797160305, 29.618997902434895, 18.231437613067758, 96.48363852297037, 113.66735911203449, 180.08267386073126, 29.398218696845227, 27.477049614924617, 94.44248696839398, 32.48823846245275, 101.90362307175305, 28.084492691150786, 52.62027291990137, 57.90923194119936, 113.39134447025317, 28.164684658802887, 46.37541560946014, 95.9484889964702, 23.50788847305361, 17.96837851811413, 18.272537991182418, 16.17404273335016, 14.225113811542496, 18.660794927794893, 14.305173878011203, 28.576308471359823, 23.131702594903423, 16.568804194016483, 19.58706822662557, 26.179422984307376, 10.011949308920572, 10.021216020262214, 11.460641285579607, 10.030018028638567, 10.214875420366235, 7.766957956286118, 10.48382785615709, 7.77251625257387, 21.926911654528883, 8.467107106852088, 7.899747142531285, 7.898943445877296, 6.659505503349855, 6.634265811001201, 6.608932550071883, 10.668030749699119, 33.6788222601108, 8.173666377000195, 25.355547354238592, 23.09618224482348, 95.9484889964702, 46.89505107710334, 40.12169608456835, 16.73208939640293, 48.227227398978386, 37.59581150889552, 45.22079418538771, 101.90362307175305, 113.39134447025317, 49.44546139017287, 180.08267386073126, 21.048548761022285, 94.44248696839398, 31.558332752132966, 51.1426353790717, 113.66735911203449, 166.47761324387093, 96.48363852297037, 46.127059156560044, 46.37541560946014, 52.62027291990137, 29.202928050055515, 19.33627220372398, 12.679145499932519, 11.531748999072782, 8.993742095351816, 5.864249160629631, 5.441457237925961, 4.90798426072173, 4.938937741302446, 5.450575799785734, 4.933669617164237, 4.972473774233838, 4.984047357135212, 5.026106544636422, 4.967522809562311, 5.016669235946829, 4.486830695225234, 4.497504251469365, 4.111013849775539, 4.077210413584006, 3.60227335596773, 3.582246717581894, 3.6127569208309773, 6.55566454975909, 6.616249568631483, 5.910269250149647, 3.19259306804058, 6.0663938771676325, 6.173502575851788, 18.084647746809008, 20.149686671042375, 22.785484252708564, 26.35328020685348, 5.722881095271875, 12.903720309219274, 13.417634265251168, 7.063070757275515, 15.902058463206652, 24.16472011235682, 11.99849248910119, 9.628939370379788, 16.998632449870467, 28.164684658802887, 12.620015246356155, 29.398218696845227, 57.90923194119936, 9.71656372987598, 12.3696766708278, 31.822487206208006, 7.11675860960509, 7.239825905598691, 15.206519537459581, 6.053555776335264, 8.34419016057947, 11.605588013251694, 6.759899412892496, 4.349830576246882, 3.6343056882369105, 11.220757891450091, 6.744193588691485, 3.7999515268600432, 5.073954615624612, 16.998632449870467, 3.0999751129668405, 4.221398934110672, 3.183544512267744, 8.493443929455262, 2.5164061410605094, 2.4996221736731417, 2.4499734619136504, 2.5159767338610255, 4.685468585045657, 2.49454976146083, 2.514201430539138, 2.5197703489833065, 2.516775155827427, 2.534171650114663, 2.560539160961611, 20.74130492930982, 4.381369204084577, 27.713853114288817, 7.866337068565216, 5.650194067657811, 4.796328569466199, 18.46218544708512, 32.24775048947887, 51.1426353790717, 15.187427004827315, 26.354620055901357, 6.956636855710355, 18.32157253561957, 10.16302467526011, 46.127059156560044, 40.12169608456835, 31.558332752132966, 113.39134447025317, 166.47761324387093, 113.66735911203449, 96.48363852297037, 15.989289030593975, 46.37541560946014, 180.08267386073126, 49.44546139017287, 52.62027291990137, 8.845805747167624, 4.358709546903829, 4.4219337523179805, 3.0354653985317066, 3.084745569666437, 3.0812718295062647, 5.4125476880426335, 3.672244644086573, 2.112659271068468, 2.1286255560418574, 2.1653667986086598, 2.1858760466629104, 2.227409351793236, 2.2290317702083877, 2.453529278657199, 2.2050720231215024, 2.2059641973296746, 2.2348834197013803, 2.212796277088086, 8.284701081019808, 2.235805518215977, 2.2513412495845224, 2.2984203023758756, 6.853364877942266, 4.7438415382934345, 2.749044941502452, 1.8766725026824378, 6.084866220060793, 6.119921986739383, 3.352793338943881, 24.16472011235682, 6.693345446841475, 20.742310977593498, 11.819890760449072, 13.6900640333526, 7.680021101310267, 57.90923194119936, 9.401804664511332, 92.71483025081842, 113.39134447025317, 32.48823846245275, 166.47761324387093, 6.165195995755925, 26.797658527614324, 180.08267386073126, 101.90362307175305, 94.44248696839398, 3.4290769574065068, 3.144871619250584, 2.900648113821357, 2.232191369686372, 6.031642977097764, 3.002438497321038, 2.0460033816175134, 1.7065612792105824, 1.7235151350265734, 1.6863102507086862, 1.7646579306542263, 1.7680495970342751, 1.8136009517957334, 1.8069422759811968, 1.7687068587318704, 1.8399037669849887, 1.7949556287815795, 1.8033155791164572, 1.78527531343411, 1.8300279136880364, 1.8600449348428518, 2.5375055523657895, 2.5859364075204296, 1.8882489622811185, 2.0359041927691885, 2.2935755706437018, 2.368119489376555, 1.490501439280435, 1.5051133363415163, 1.5194568809466786, 3.1434232682609102, 3.693323029317792, 9.34739554822983, 22.609841652679055, 12.837801956318483, 4.857597604308035, 18.46218544708512, 5.231817316340022, 57.90923194119936, 22.22166004474117, 13.752585281879947, 6.529405083458045, 6.083466556080934, 10.26437334826243, 4.913742666711636, 4.181826578529826, 4.035804745053127, 4.699630585589404, 2.5761994860077904, 2.5773954216196326, 2.156359908944082, 2.1544333886256792, 1.9569529410384832, 1.9572036243905786, 1.974741620142265, 1.953046542159618, 1.9880693998383843, 1.9853346705897161, 1.9941994615557996, 1.9745965613317216, 2.035173751890242, 1.9931134838384732, 1.9914737751861986, 2.0009377616339097, 2.0422711160571585, 2.0153042609365386, 5.62701963758413, 2.0947278018354636, 2.0191156349080486, 2.1128881172004634, 2.0790246875088996, 2.166069026266688, 2.1209219524406095, 2.735743592654932, 11.980844685208497, 8.147533344775354, 6.152289028556486, 12.093587810784564, 15.74196540712714, 6.329752057150711, 27.713853114288817, 4.413634469626385, 3.0486625179926325, 13.221167623321067, 10.475122655620979, 21.69085994010621, 48.74183429506811, 5.878028196324182, 24.078344797160305, 20.149686671042375, 21.027244709079, 8.153949619253222, 10.39100916784113, 8.710799232831175, 2.2552577001872955, 1.872765877288971, 1.74216880087769, 1.73734121507964, 1.485906848504833, 1.5821640924531275, 1.5734493475428004, 1.5846798668881035, 1.583508179279058, 1.6527824798434376, 1.4684726891185642, 2.18781287542189, 1.461518744388202, 1.4559828457875355, 1.4718006031078024, 1.465673001172596, 1.4564480875004844, 1.4498496818211946, 1.523221237999015, 1.5005608776174726, 1.5055495392849434, 1.4772032612261776, 1.5393733454131238, 1.4953762510517552, 1.5105703933991597, 1.5064311708146494, 1.4728372765145994, 1.5614037375393692, 1.5094402860757181, 1.4620185300876067, 3.4892596145232573, 1.5841303286627508, 1.7759994272140625, 5.9316799664760405, 13.293854865815753, 6.165195995755925, 2.1548746875388667, 4.457472842076231, 4.239189325871576, 22.785484252708564, 28.576308471359823, 46.37541560946014, 5.763795488129408, 1.900968722204115, 3.8040289313764224, 1.5867984668167665, 1.6162454864940015, 1.6461037022606668, 1.5854603323332697, 1.4734304477757043, 1.5051956443920214, 1.6284440882121858, 4.157289686904499, 1.592716744052651, 3.735231268541421, 3.829493089821675, 1.4173124942838766, 1.3886007982895856, 1.4331812384336027, 1.3988494861895395, 1.4443849999266873, 1.4407032406002012, 1.433612965005413, 1.4427647687283212, 1.4692044609255202, 1.4417530774627678, 1.5654529620216575, 1.4803643702958764, 2.0201854059159987, 2.0855139165070145, 2.2759636528849194, 2.390302410907291, 2.534880104979807, 4.5994923735694195, 17.41105015102734, 23.09618224482348, 13.293854865815753, 46.37541560946014, 45.22079418538771, 13.148728081344947, 3.1796336902872593, 5.507001100048298, 3.6494910318941947, 17.232838312584565, 46.127059156560044, 17.657472278743157, 25.365697057002212, 13.490503654183609, 1.5147211794092275, 1.3545078392415209, 1.4363080753439643, 1.4854656987941535, 1.47478656574448, 1.492255827987584, 1.5286158320855026, 1.5455825151963611, 2.2007528859418803, 2.0671724766747985, 2.182077392054118, 1.4734304477757043, 1.3886007982895856, 1.5220031229804438, 1.5518937854773724, 1.433612965005413, 1.4427647687283212, 1.4498496818211946, 1.465673001172596, 1.5571574905380436, 1.4859904472280872, 1.5549841622969691, 1.4173124942838766, 1.6162454864940015, 1.5468304603910379, 1.5081282334594643, 1.5300962349522218, 1.5506487571050211, 1.4620185300876067, 1.5391217817285736, 1.5232829653012576, 9.280574109116602, 1.6437426982291745, 1.6353718302669642, 1.5893292045156484, 1.74216880087769, 6.419577219236168, 1.6858580422403844, 13.66302451107243, 7.375661692911095, 2.381673981797597, 1.9551536827850042, 4.306333784971145, 1.9228137867739705, 1.945470455775766, 2.0019583077414005, 1.9574381294446728, 4.280819894769663, 2.6192690323474017, 7.870204059060406, 46.37541560946014, 11.980844685208497, 5.583332506332713, 4.328509251029859, 92.71483025081842, 4.572338433779279, 3.1141954750274627, 17.657472278743157, 6.254073889226305, 17.074895070859164, 20.407890522579407, 180.08267386073126, 31.558332752132966, 19.86852382161112, 49.44546139017287, 113.66735911203449], "loglift": [30.0, 29.0, 28.0, 27.0, 26.0, 25.0, 24.0, 23.0, 22.0, 21.0, 20.0, 19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 13.0, 12.0, 11.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.8098, 0.8081, 0.7985, 0.7972, 0.7887, 0.785, 0.7836, 0.78, 0.7783, 0.7778, 0.7713, 0.7666, 0.7651, 0.7631, 0.7558, 0.7544, 0.7537, 0.7531, 0.751, 0.7503, 0.7413, 0.7383, 0.7379, 0.7376, 0.7348, 0.7273, 0.7272, 0.7261, 0.7257, 0.7235, 0.7226, 0.7211, 0.7065, 0.6998, 0.6954, 0.6408, 0.6722, 0.6588, 0.6927, 0.4761, 0.6432, 0.5983, 0.6738, 0.3768, 0.2808, 0.1587, 0.5535, 0.557, 0.1528, 0.4591, -0.0157, 0.4922, 0.2058, 0.1054, -0.2841, 0.4354, 0.0757, -0.6972, 1.1291, 1.1201, 1.1161, 1.1093, 1.1076, 1.1062, 1.1033, 1.1026, 1.0948, 1.0909, 1.089, 1.0699, 1.0683, 1.0566, 1.0483, 1.0472, 1.0454, 1.0406, 1.0398, 1.0397, 1.0385, 1.0209, 1.0178, 1.0131, 1.005, 0.9965, 0.9955, 0.9918, 0.9907, 0.9904, 0.9897, 0.985, 0.8976, 0.9166, 0.9141, 0.9574, 0.8442, 0.8547, 0.7995, 0.5978, 0.5521, 0.7236, 0.3835, 0.8609, 0.4064, 0.7247, 0.5212, 0.1069, -0.2215, -0.0455, 0.3788, 0.2992, 0.1755, 2.3184, 2.2931, 2.2622, 2.223, 2.2196, 2.1451, 2.1218, 2.115, 2.1079, 2.1059, 2.1051, 2.1046, 2.1027, 2.1017, 2.0993, 2.0968, 2.0755, 2.0687, 2.0289, 2.0192, 1.9872, 1.9864, 1.98, 1.9371, 1.9238, 1.9192, 1.9158, 1.8975, 1.8785, 1.8616, 1.829, 1.5398, 1.4612, 1.8267, 1.5347, 1.489, 1.7515, 1.3269, 0.9789, 1.4332, 1.5466, 1.0868, 0.6589, 1.2821, 0.5377, -0.2229, 1.4404, 1.1999, 2.3623, 2.3368, 2.3081, 2.2903, 2.2881, 2.2612, 2.1834, 2.181, 2.1564, 2.1472, 2.1155, 2.0943, 2.0696, 2.0483, 2.0219, 1.9929, 1.9893, 1.968, 1.9197, 1.9005, 1.8849, 1.8841, 1.8802, 1.8783, 1.8782, 1.8776, 1.8763, 1.8759, 1.8653, 1.8652, 1.8331, 1.8272, 1.6161, 1.75, 1.7856, 1.8028, 1.5704, 1.4673, 1.3789, 1.5756, 1.3725, 1.7053, 1.3756, 1.5701, 0.9757, 0.8742, 0.9402, 0.1633, -0.2563, -0.0205, -0.037, 1.1712, 0.294, -0.85, 0.2054, 0.1337, 3.3974, 3.0278, 3.013, 2.9994, 2.9917, 2.9762, 2.8919, 2.8132, 2.7154, 2.704, 2.6916, 2.6876, 2.6809, 2.68, 2.676, 2.6741, 2.6739, 2.6687, 2.6682, 2.6668, 2.6648, 2.6551, 2.6447, 2.5726, 2.5516, 2.4601, 2.3819, 2.3058, 2.3036, 2.2561, 2.1433, 2.2136, 1.9934, 2.0324, 1.8856, 2.0806, 0.9561, 1.8684, 0.2921, -0.2282, 0.6262, -0.9164, 1.8137, 0.3733, -1.4191, -0.9359, -0.901, 3.0305, 3.0185, 2.9951, 2.6332, 2.5011, 2.4849, 2.4503, 2.3443, 2.3395, 2.3194, 2.3123, 2.3025, 2.2821, 2.2656, 2.2637, 2.2561, 2.2556, 2.25, 2.2497, 2.2348, 2.2207, 2.2111, 2.1842, 2.1496, 2.0793, 2.0545, 1.9964, 1.9907, 1.98, 1.9689, 1.9071, 1.8861, 1.7053, 1.0107, 1.0966, 1.5928, 0.7843, 1.5391, -0.3002, 0.2848, 0.6074, 1.045, 1.0923, 0.5347, 3.3458, 3.3202, 3.2691, 3.2047, 3.0371, 3.026, 2.7798, 2.7718, 2.6831, 2.6806, 2.6796, 2.6785, 2.6761, 2.6663, 2.6631, 2.6603, 2.655, 2.6517, 2.6512, 2.649, 2.6418, 2.6409, 2.636, 2.6157, 2.6111, 2.5752, 2.5708, 2.5705, 2.5398, 2.5348, 2.0237, 2.0938, 2.1624, 1.873, 1.7531, 1.7047, 0.4868, 1.9883, 2.2949, 1.0265, 1.2145, 0.52, -0.2147, 1.6889, 0.3938, 0.5383, 0.4313, 1.3165, 1.0511, 1.2071, 3.0339, 2.8966, 2.708, 2.7044, 2.5577, 2.5316, 2.4918, 2.4744, 2.4643, 2.4449, 2.1291, 2.1273, 2.1159, 2.0981, 2.0976, 2.0752, 2.0656, 2.0627, 2.0505, 2.0425, 2.0269, 2.0235, 2.0183, 2.0142, 2.0112, 2.0067, 2.0051, 1.9943, 1.9931, 1.9922, 1.8958, 1.9606, 1.8863, 1.0593, 0.4943, 0.9149, 1.6929, 1.0256, 1.0651, -0.5017, -0.7286, -1.2537, 0.7446, 3.4096, 3.3225, 3.1418, 3.1075, 3.1005, 2.8854, 2.635, 2.5837, 2.5128, 2.4987, 2.4937, 2.4707, 2.3147, 2.1948, 2.1706, 2.1616, 2.1576, 2.1452, 2.143, 2.1355, 2.1255, 2.1147, 2.0904, 1.9123, 1.8397, 1.7834, 1.747, 1.6713, 1.6183, 1.586, 1.4791, 0.9617, 0.5933, 0.7397, -0.1617, -0.4231, 0.4261, 1.3807, 0.8588, 1.2369, -0.279, -1.2511, -0.3156, -0.6931, -0.0784, 2.569, 2.2485, 2.147, 2.1305, 2.1117, 2.063, 2.0577, 2.045, 1.732, 1.6994, 1.6261, 1.2936, 1.2915, 1.2552, 1.2508, 1.2471, 1.244, 1.2433, 1.2398, 1.2356, 1.2195, 1.2089, 1.2018, 1.1975, 1.1845, 1.1805, 1.1797, 1.1774, 1.1723, 1.1698, 1.1689, 0.8642, 1.1526, 1.1506, 1.1599, 1.1204, 0.5195, 1.1312, -0.0546, 0.2774, 0.9101, 1.0361, 0.476, 1.0386, 1.0286, 1.0019, 1.0182, 0.4028, 0.7854, -0.1032, -1.6824, -0.5312, 0.1054, 0.3234, -2.41, 0.2686, 0.5987, -1.0304, -0.0618, -1.0167, -1.1971, -3.2932, -1.6257, -1.1779, -2.0871, -2.9299], "logprob": [30.0, 29.0, 28.0, 27.0, 26.0, 25.0, 24.0, 23.0, 22.0, 21.0, 20.0, 19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 13.0, 12.0, 11.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, -5.5977, -5.7088, -5.8666, -5.7744, -5.9572, -6.0335, -4.5564, -5.9116, -6.1375, -6.0593, -5.9523, -5.7134, -6.2545, -6.1723, -6.2975, -6.151, -5.233, -6.2834, -6.4539, -5.6631, -6.5322, -6.534, -6.5326, -6.533, -5.859, -6.5555, -6.281, -6.6185, -6.6267, -6.5569, -5.8753, -6.1466, -5.4264, -5.6177, -5.4906, -4.2664, -5.1244, -4.8913, -5.9256, -3.8457, -5.6121, -5.45, -5.8598, -4.4905, -4.4226, -4.0845, -5.5022, -5.5663, -4.7359, -5.4967, -4.8283, -5.6093, -5.2678, -5.2724, -4.9899, -5.6632, -5.5242, -5.5701, -5.1503, -5.428, -5.4152, -5.5439, -5.6741, -5.404, -5.6728, -4.9815, -5.2006, -5.5383, -5.3728, -5.1018, -6.0646, -6.0754, -5.9494, -6.0839, -6.0675, -6.3462, -6.0471, -6.3464, -5.3105, -6.2796, -6.3521, -6.3568, -6.5356, -6.548, -6.5528, -6.0777, -4.9291, -6.3454, -5.2139, -5.3121, -3.9753, -4.6721, -4.8307, -5.662, -4.7165, -4.9551, -4.8256, -4.2149, -4.1538, -4.8122, -3.8598, -5.5289, -4.4823, -5.2601, -4.9809, -4.5965, -4.5433, -4.9128, -5.2264, -5.3007, -5.2981, -3.7441, -4.1816, -4.6346, -4.7686, -5.0206, -5.5227, -5.6208, -5.7308, -5.7316, -5.635, -5.7355, -5.7281, -5.7277, -5.7203, -5.7345, -5.7271, -5.86, -5.8644, -5.9941, -6.012, -6.1679, -6.1743, -6.1722, -5.6192, -5.6234, -5.7408, -6.36, -5.7365, -5.7379, -4.68, -4.6045, -4.7708, -4.7038, -5.8655, -5.3445, -5.3512, -5.7303, -5.3434, -5.2729, -5.5187, -5.6253, -5.5167, -5.4397, -5.6193, -5.5181, -5.6007, -5.7224, -5.7215, -3.6142, -5.1374, -5.149, -4.4246, -5.3479, -5.0539, -4.8018, -5.3447, -5.8102, -5.999, -4.9034, -5.4337, -6.0321, -5.7642, -4.5816, -6.3123, -6.0072, -6.3107, -5.3777, -6.6133, -6.6357, -6.6565, -6.6338, -6.0139, -6.6443, -6.6372, -6.6362, -6.6378, -6.6416, -6.6313, -4.5714, -6.1321, -4.4987, -5.6241, -5.9194, -6.066, -4.9505, -4.4959, -4.1232, -5.1406, -4.7925, -5.7917, -5.153, -5.5478, -4.6296, -4.8706, -5.0447, -4.5426, -4.5781, -4.7239, -4.9043, -5.4935, -5.306, -5.0932, -5.3304, -5.3399, -3.8594, -4.9368, -4.9371, -5.3269, -5.3186, -5.3352, -4.8561, -5.3227, -5.9734, -5.9772, -5.9725, -5.967, -5.9549, -5.9552, -5.8631, -5.9718, -5.9716, -5.9638, -5.9743, -4.6555, -5.9673, -5.9701, -5.9597, -4.9394, -5.3282, -5.9653, -6.4252, -5.325, -5.3215, -5.9708, -4.1085, -5.322, -4.4111, -4.9345, -4.9344, -5.3175, -4.4217, -5.3274, -4.6151, -4.934, -5.3296, -5.2382, -5.804, -5.7751, -5.6624, -5.7485, -5.7897, -5.1739, -5.2724, -5.3767, -6.0005, -5.1385, -5.8524, -6.2705, -6.5579, -6.5529, -6.5947, -6.5564, -6.5643, -6.5593, -6.5795, -6.6027, -6.5709, -6.5961, -6.5971, -6.6074, -6.5975, -6.5953, -6.2944, -6.3024, -6.6514, -6.6464, -6.552, -6.5782, -7.0469, -7.0478, -7.0494, -6.3843, -6.2441, -5.4963, -5.3076, -5.7877, -6.2633, -5.7367, -6.2428, -5.678, -6.0508, -6.2081, -6.5154, -6.5388, -6.5733, -4.4988, -4.6858, -4.7724, -4.6845, -5.4533, -5.4639, -5.8885, -5.8974, -6.0822, -6.0846, -6.0766, -6.0888, -6.0734, -6.0846, -6.0833, -6.0961, -6.0711, -6.0953, -6.0966, -6.0941, -6.0808, -6.095, -5.0731, -6.0816, -6.1229, -6.1134, -6.134, -6.0933, -6.145, -5.8954, -4.9296, -5.2452, -5.4575, -5.071, -4.9273, -5.8867, -5.6279, -5.9637, -6.0271, -5.8283, -5.8731, -5.8398, -5.7648, -5.9766, -5.8615, -5.8952, -5.9596, -6.0216, -6.0446, -6.065, -5.5896, -5.9126, -6.1736, -6.1799, -6.483, -6.4463, -6.4916, -6.5019, -6.5128, -6.4893, -6.9233, -6.5265, -6.9414, -6.9629, -6.9526, -6.9792, -6.9951, -7.0025, -6.9654, -6.9883, -7.0006, -7.023, -6.987, -7.0201, -7.013, -7.0203, -7.0443, -6.9968, -7.0318, -7.0647, -6.2912, -7.0161, -6.976, -6.5971, -6.3551, -6.7028, -6.9761, -6.9165, -6.9273, -6.8122, -6.8127, -6.8536, -6.9404, -5.3847, -4.7781, -5.8331, -5.849, -5.8377, -6.0904, -6.4141, -6.4441, -6.4363, -5.5131, -6.4776, -5.6482, -5.7793, -6.8931, -6.9378, -6.9152, -6.9434, -6.9238, -6.9285, -6.941, -6.9446, -6.9372, -6.9804, -7.0762, -7.2047, -6.9501, -6.9546, -6.943, -6.947, -6.9206, -6.4317, -5.6179, -5.7037, -6.1097, -5.7616, -6.0482, -6.4342, -6.8992, -6.8718, -6.9052, -6.8688, -6.8564, -6.8811, -6.8964, -6.9131, -6.4525, -6.8847, -6.9276, -6.9104, -6.9365, -6.9734, -6.9546, -6.9563, -6.9159, -7.0111, -7.0303, -7.7554, -7.8169, -7.7614, -7.7464, -7.8294, -7.8261, -7.8219, -7.8145, -7.7582, -7.8211, -7.7863, -7.8861, -7.7591, -7.816, -7.8453, -7.8316, -7.8206, -7.8845, -7.8357, -7.8469, -6.3445, -7.7871, -7.7942, -7.8135, -7.7611, -7.0578, -7.7832, -6.8766, -7.1611, -7.6587, -7.7301, -7.5006, -7.7443, -7.7426, -7.7407, -7.7469, -7.5797, -7.6884, -7.4768, -7.2823, -7.4845, -7.6115, -7.6481, -7.3172, -7.648, -7.702, -7.5959, -7.6652, -7.6158, -7.6178, -7.5365, -7.6106, -7.6255, -7.6229, -7.6333]}, "token.table": {"Topic": [1, 2, 1, 2, 4, 1, 1, 1, 2, 4, 6, 1, 2, 3, 4, 1, 2, 3, 4, 3, 7, 1, 2, 1, 2, 3, 1, 2, 7, 1, 2, 4, 1, 1, 1, 2, 1, 2, 7, 2, 2, 1, 2, 3, 4, 1, 5, 4, 1, 1, 2, 4, 7, 2, 3, 1, 2, 4, 4, 1, 1, 5, 1, 2, 4, 4, 2, 3, 7, 7, 1, 2, 4, 1, 2, 4, 1, 2, 4, 6, 7, 1, 2, 4, 1, 1, 1, 2, 6, 7, 1, 2, 2, 2, 1, 2, 1, 1, 2, 3, 7, 1, 2, 6, 5, 5, 2, 3, 5, 1, 1, 2, 4, 1, 2, 1, 2, 5, 1, 2, 7, 5, 1, 2, 1, 2, 4, 4, 1, 2, 3, 4, 1, 2, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 6, 2, 5, 1, 4, 6, 1, 2, 4, 1, 1, 2, 4, 3, 4, 1, 2, 3, 5, 1, 2, 3, 5, 1, 1, 1, 2, 4, 4, 1, 4, 7, 1, 4, 3, 2, 6, 1, 2, 4, 1, 3, 4, 1, 3, 1, 2, 4, 5, 2, 1, 2, 1, 7, 2, 6, 1, 1, 2, 4, 1, 2, 3, 1, 2, 4, 4, 2, 7, 3, 3, 2, 7, 5, 1, 2, 4, 5, 2, 3, 4, 1, 7, 1, 2, 4, 1, 2, 4, 6, 7, 1, 2, 3, 4, 5, 1, 1, 2, 3, 1, 2, 5, 1, 2, 3, 1, 1, 2, 5, 2, 1, 5, 4, 6, 2, 1, 1, 2, 1, 2, 4, 7, 1, 1, 2, 3, 1, 2, 3, 4, 5, 1, 2, 1, 1, 1, 2, 1, 2, 5, 1, 2, 4, 1, 2, 7, 1, 5, 2, 3, 4, 1, 2, 3, 4, 6, 2, 4, 2, 4, 5, 1, 2, 1, 1, 7, 1, 2, 4, 5, 1, 1, 2, 3, 7, 2, 5, 5, 1, 2, 4, 1, 2, 5, 2, 4, 1, 4, 6, 1, 2, 5, 1, 2, 4, 4, 2, 7, 1, 1, 1, 4, 1, 2, 7, 3, 4, 1, 2, 2, 1, 2, 4, 1, 3, 4, 1, 2, 4, 6, 1, 1, 2, 4, 5, 1, 3, 1, 2, 5, 1, 4, 5, 7, 1, 1, 2, 1, 3, 4, 1, 3, 7, 1, 2, 6, 1, 2, 2, 4, 1, 2, 3, 4, 5, 1, 2, 3, 1, 2, 3, 4, 2, 2, 5, 2, 7, 3, 1, 7, 1, 2, 7, 1, 2, 7, 1, 2, 1, 7, 1, 2, 6, 1, 6, 1, 2, 3, 4, 7, 1, 1, 2, 4, 3, 3, 1, 3, 1, 1, 2, 7, 1, 2, 4, 1, 2, 5, 2, 2, 2, 3, 1, 2, 3, 7, 3, 1, 2, 5, 1, 3, 5, 1, 3, 1, 2, 4, 7, 2, 1, 2, 4, 1, 3, 6, 1, 6, 5, 1, 9, 1, 2, 7, 1, 2, 3, 5, 5, 1, 2, 3, 3, 1, 2, 4, 4, 3, 1, 2, 3, 5, 1, 2, 3, 5, 1, 3, 1, 2, 3, 3, 3, 1, 4, 1, 2, 2, 4, 1, 5, 1, 2, 1, 2, 4, 7, 1, 2, 5, 7, 1, 2, 5, 1, 1, 1, 2, 3, 4, 5, 2, 2, 7, 1, 2, 7, 1, 2, 1, 2, 7, 1, 7, 1, 2, 7, 1, 2, 5, 7, 2, 1, 7, 3, 1, 2, 4, 5, 7, 1, 1, 2, 2, 1, 3, 7, 1, 6, 7, 5, 1, 1, 2, 3, 1, 1, 5, 2, 3, 1, 2, 4, 7, 1, 2, 3, 5, 1, 5, 5, 5, 1, 2, 7, 1, 2, 4, 5, 1, 2, 4, 5, 4, 1, 3, 1, 2, 3, 1, 7, 1, 2, 3, 4, 7, 1, 2, 7, 1, 2, 4, 5, 1, 2, 3, 1, 2, 3, 5, 1, 2, 3, 1, 2, 1, 1, 2, 3, 5, 1, 3, 5, 3, 3, 1, 2, 2, 1, 2, 4, 7, 1, 2, 1, 2, 4, 1, 5, 1, 2, 3, 4, 1, 2, 4, 1, 3, 7, 1, 2, 7, 1, 2, 3, 6, 1, 2, 3], "Freq": [0.8739078764291088, 0.05826052509527392, 0.35397014262716553, 0.17698507131358276, 0.5309552139407483, 0.4837525708588065, 0.4794981189456074, 0.41172615826108555, 0.41172615826108555, 0.20586307913054278, 0.20586307913054278, 0.208445179378862, 0.7504026457639033, 0.010422258968943101, 0.020844517937886203, 0.17059369413729086, 0.7676716236178089, 0.021324211767161358, 0.021324211767161358, 0.7973417843333365, 0.7173898638940422, 0.8750982968204859, 0.07955439062004417, 0.7027861635577355, 0.23426205451924517, 0.05856551362981129, 0.9070238440774606, 0.9461065161145233, 0.7433461699744615, 0.1482756962488114, 0.1482756962488114, 0.5931027849952456, 0.9384201306540636, 0.884346295013928, 0.39449597558302113, 0.39449597558302113, 0.15577349813684221, 0.7788674906842111, 0.473285827043687, 0.913876695274774, 0.8810680140117971, 0.18661657502190662, 0.7049959500827583, 0.02073517500243407, 0.062205525007302205, 0.49302645144596585, 0.3286843009639772, 0.6282305751633213, 0.41835710637986945, 0.6658028759210272, 0.09511469656014673, 0.1426720448402201, 0.04755734828007337, 0.9006092457744234, 0.958807964461864, 0.03499402314341039, 0.9098446017286701, 0.03499402314341039, 0.4008739434463682, 0.916992416016554, 0.43937432776329294, 0.44417966409336956, 0.3532136109824662, 0.11773787032748873, 0.4709514813099549, 0.39460626116417696, 0.8861944699266733, 0.5552049504201804, 0.3881686978944518, 0.5014543526252071, 0.5390072035044258, 0.29400392918423224, 0.09800130972807741, 0.0379440112541512, 0.6071041800664192, 0.3035520900332096, 0.43331814767698973, 0.10832953691924743, 0.379153379217366, 0.054164768459623716, 0.49135853834161014, 0.25016747100802184, 0.43779307426403824, 0.25016747100802184, 0.9116480451068509, 0.8768192362686744, 0.16579230630808464, 0.3315846126161693, 0.3315846126161693, 0.3879885839835942, 0.06035438576557815, 0.9053157864836723, 0.8267286467104192, 0.9012537520348765, 0.05358828516520051, 0.9110008478084087, 0.7008003311854867, 0.8707511955568922, 0.6422204437832737, 0.8052303237138916, 0.4809947693301354, 0.2139633430168419, 0.5349083575421048, 0.10698167150842094, 0.904383413863859, 0.6490826225872045, 0.4902023271702458, 0.16340077572341527, 0.32680155144683054, 0.510871830357009, 0.5222587154100785, 0.23211498462670155, 0.23211498462670155, 0.11831730382655302, 0.8282211267858711, 0.4254502345808845, 0.31908767593566334, 0.21272511729044224, 0.14846124847786024, 0.8313829914760174, 0.46374447783611233, 0.4697867115057487, 0.17910450414081241, 0.7164180165632497, 0.6765299344711595, 0.24924787059463774, 0.035606838656376816, 0.6896820341422258, 0.2426916376673747, 0.6269533973073846, 0.02022430313894789, 0.10112151569473946, 0.08725515222767277, 0.8725515222767277, 0.3856850863262948, 0.14463190737236054, 0.04821063579078685, 0.1928425431631474, 0.1928425431631474, 0.4662469021764201, 0.29356286433330153, 0.06907361513724743, 0.06907361513724743, 0.06907361513724743, 0.017268403784311857, 0.4377411758208845, 0.4377411758208845, 0.5415177562655351, 0.27075887813276756, 0.27075887813276756, 0.19708493192284857, 0.19708493192284857, 0.5912547957685457, 0.45827888765147834, 0.3251887346446353, 0.45526422850248943, 0.1951132407867812, 0.1479311952619883, 0.7396559763099416, 0.7765286346203236, 0.1350484581948389, 0.06752422909741945, 0.033762114548709726, 0.110591039869875, 0.16588655980481248, 0.6082507192843125, 0.0552955199349375, 0.8586718797144943, 0.7263481389108345, 0.8137902603773567, 0.07875389616555065, 0.07875389616555065, 0.3973921314540116, 0.4919795198541158, 0.39358361588329266, 0.09839590397082316, 0.11984386510320781, 0.7190631906192468, 0.6670366123655981, 0.38670711201242086, 0.38670711201242086, 0.4447573014176761, 0.4447573014176761, 0.07412621690294602, 0.4471727192280631, 0.4471727192280631, 0.07452878653801052, 0.3239652005367553, 0.6479304010735106, 0.27116211172242927, 0.40674316758364387, 0.27116211172242927, 0.4533165140261581, 0.4434083075814137, 0.5114687447871399, 0.9009677966302285, 0.5331419104995343, 0.35542794033302283, 0.39408780763757195, 0.39408780763757195, 0.9283097811363646, 0.024924170650517965, 0.7726492901660569, 0.17446919455362575, 0.7522272584541541, 0.15044545169083082, 0.07522272584541541, 0.6307731249823152, 0.3153865624911576, 0.0394233203113947, 0.5263225032906222, 0.7565518277146914, 0.4896509538511303, 0.8526240722457913, 0.7297469942028534, 0.8036001993498899, 0.11480002847855571, 0.6483516889259253, 0.6787699426857337, 0.24627935973553167, 0.06006813652086138, 0.012013627304172277, 0.16919702938655123, 0.6767881175462049, 0.3968615633577427, 0.36553133220702866, 0.36553133220702866, 0.4031288943469521, 0.24807931959812438, 0.341109064447421, 0.3095996914764136, 0.48651380089150703, 0.04422852735377337, 0.08845705470754674, 0.04422852735377337, 0.3174845502378196, 0.5291409170630327, 0.02645704585315163, 0.08819015284383877, 0.02645704585315163, 0.4570774819154328, 0.6390982259541859, 0.14202182798981908, 0.17752728498727385, 0.511319741306261, 0.2191370319883976, 0.2191370319883976, 0.9145248810260249, 0.06651090043825636, 0.8149985386081476, 0.7635718115628581, 0.14940212005222148, 0.44820636015666443, 0.29880424010444295, 0.8973064628899399, 0.4075761429459255, 0.4075761429459255, 0.40006046134985324, 0.4479902635500747, 0.8989258457372599, 0.901818855050285, 0.051054092855032575, 0.9189736713905864, 0.15642525929107115, 0.5083820926959812, 0.3128505185821423, 0.5120205680783374, 0.4640641081278483, 0.845096439382449, 0.11022997035423249, 0.7338674200544542, 0.554248822988005, 0.34310641423066973, 0.008797600364888969, 0.0791784032840007, 0.008797600364888969, 0.8227546460323262, 0.10970061947097681, 0.9670414568078997, 0.89938240538797, 0.8755217079063208, 0.04864009488368449, 0.8396128942704493, 0.04419015233002365, 0.04419015233002365, 0.6229657238789656, 0.22653299050144207, 0.11326649525072104, 0.5007994142022036, 0.2503997071011018, 0.1669331380674012, 0.27231301204572606, 0.5446260240914521, 0.1176565235996523, 0.29414130899913077, 0.5882826179982615, 0.03142431933494242, 0.03142431933494242, 0.06284863866988484, 0.8170323027085029, 0.4887577454585768, 0.9358560648787295, 0.39745995522995037, 0.1381248683378811, 0.8287492100272866, 0.44862527908541744, 0.9286439728347576, 0.06633171234533984, 0.6730270954612569, 0.4360004583233967, 0.5063953632212186, 0.6115026433829355, 0.2902046443173253, 0.07255116107933132, 0.010364451582761617, 0.9223669239051853, 0.48118521687714155, 0.2887111301262849, 0.09623704337542831, 0.09623704337542831, 0.2294257025477509, 0.6882771076432527, 0.4489520523898865, 0.22823915388544283, 0.22823915388544283, 0.45647830777088566, 0.7278801865661977, 0.2183640559698593, 0.036394009328309884, 0.1405134071359897, 0.8430804428159382, 0.654422409716533, 0.21814080323884433, 0.07271360107961478, 0.8358323450740855, 0.11940462072486938, 0.44726609351869434, 0.45282613048358755, 0.40969983234229346, 0.10781574535323513, 0.825960837685868, 0.843642112697682, 0.09373801252196466, 0.8916310156734356, 0.6930792626321005, 0.5267515029015254, 0.395063627176144, 0.7890907851041645, 0.12459328185855228, 0.04153109395285076, 0.6264500227169505, 0.6451664697675247, 0.21870647032867319, 0.6561194109860196, 0.707682476385553, 0.2084928055942785, 0.2084928055942785, 0.416985611188557, 0.13152253512535994, 0.06576126756267997, 0.7891352107521596, 0.7010545910135652, 0.15578990911412557, 0.07789495455706279, 0.07789495455706279, 0.9186041271873259, 0.7981463138077285, 0.12942913196882083, 0.021571521994803472, 0.043143043989606944, 0.3022860578721615, 0.604572115744323, 0.5208319023130772, 0.1302079755782693, 0.2604159511565386, 0.916989133542, 0.408167686526249, 0.45191688469213404, 0.46415916374091454, 0.949566706145904, 0.684476851625592, 0.228158950541864, 0.4388759040225918, 0.4388759040225918, 0.08777518080451836, 0.9196657902872167, 0.795844649228253, 0.5017275775356916, 0.45001138438199323, 0.49501252282019254, 0.04500113843819933, 0.12989159715659873, 0.822646781991792, 0.2368882959436932, 0.4737765918873864, 0.49421745075169776, 0.4497934102346912, 0.011106010129251635, 0.0333180303877549, 0.0055530050646258175, 0.4850571409154278, 0.16168571363847592, 0.32337142727695184, 0.2432509246720495, 0.685525333166685, 0.022113720424731774, 0.04422744084946355, 0.8584650686260891, 0.3695117558813177, 0.5542676338219765, 0.41987274817741344, 0.4962029899819131, 0.7357971984975135, 0.4531412861131883, 0.22657064305659416, 0.49094613433708983, 0.12273653358427246, 0.24547306716854492, 0.48762338473943434, 0.16254112824647812, 0.16254112824647812, 0.11953079813391151, 0.7769501878704248, 0.7358397194204774, 0.12263995323674624, 0.8427450873732754, 0.07661318976120685, 0.6359560077929653, 0.9481512277980004, 0.689501077524764, 0.4134422371780528, 0.24806534230683167, 0.08268844743561056, 0.08268844743561056, 0.16537689487122112, 0.8640047326501856, 0.2874952425263222, 0.2874952425263222, 0.43124286378948334, 0.6686234011888437, 0.8044285765220195, 0.464982180039442, 0.464982180039442, 0.4950040709489122, 0.5727856558109498, 0.2863928279054749, 0.09546427596849162, 0.16437996178353548, 0.4931398853506064, 0.39054274788925697, 0.2982587648289103, 0.2982587648289103, 0.2982587648289103, 0.5731875013471197, 0.4543899528147246, 0.9303578959969057, 0.8098907517196523, 0.24814281639354852, 0.09925712655741942, 0.5955427593445165, 0.04962856327870971, 0.802560592501907, 0.8838402255500372, 0.051990601502943365, 0.051990601502943365, 0.43483059380483485, 0.21741529690241743, 0.21741529690241743, 0.5480216234322243, 0.27401081171611213, 0.7563628481920773, 0.07563628481920773, 0.07563628481920773, 0.07563628481920773, 0.9087621101888587, 0.12674940819646588, 0.6337470409823295, 0.19012411229469883, 0.34947432363261194, 0.5242114854489179, 0.5832473358990018, 0.3330626092398769, 0.3330626092398769, 0.447450632630143, 0.5257583567526481, 0.2628791783763241, 0.3159681425026124, 0.3159681425026124, 0.1579840712513062, 0.22390015880742523, 0.597067090153134, 0.11195007940371261, 0.03731669313457087, 0.4534999263127918, 0.25003141042302146, 0.33337521389736197, 0.4167190173717024, 0.8107555451390582, 0.8889383446357436, 0.06349559604541026, 0.03174779802270513, 0.39733386499964685, 0.9308929772168482, 0.4138264359572044, 0.08276528719144088, 0.24829586157432265, 0.24829586157432265, 0.7483446608403134, 0.06803133280366486, 0.17007833200916211, 0.03401566640183243, 0.867483936634731, 0.7350972037638616, 0.6395831054843585, 0.15989577637108962, 0.15989577637108962, 0.5583088373516747, 0.8895073835989352, 0.3813719109480248, 0.3813719109480248, 0.6290032735875662, 0.3145016367937831, 0.21342582536816976, 0.4268516507363395, 0.8894305595471058, 0.4574824823789346, 0.26772104003897257, 0.5354420800779451, 0.3659511842306973, 0.5123316579229762, 0.07319023684613946, 0.5064325642933222, 0.8816936084021574, 0.3637626962378665, 0.3637626962378665, 0.5021406821721778, 0.6771681396461615, 0.24624295987133146, 0.061560739967832866, 0.721623996867485, 0.5222623342279311, 0.04821297422742609, 0.19285189690970436, 0.19285189690970436, 0.48212974227426086, 0.04821297422742609, 0.9043954781025751, 0.8980946006754684, 0.5109984910875459, 0.04323071316939414, 0.9078449765572769, 0.04323071316939414, 0.0763958778311826, 0.8785525950585998, 0.6805003083349268, 0.1701250770837317, 0.1701250770837317, 0.42227598923366233, 0.50300054921689, 0.8102574278526112, 0.21278268191255825, 0.6383480457376748, 0.32440168996683727, 0.32440168996683727, 0.16220084498341863, 0.46166580467822965, 0.9274119184235037, 0.32801269215539214, 0.32801269215539214, 0.5535938464246236, 0.21278966137244104, 0.7181651071319886, 0.02659870767155513, 0.5328580232143016, 0.471493068780428, 0.9709632293410979, 0.09121211557337174, 0.8665150979470314, 0.8564088228138642, 0.8775174680330742, 0.058501164535538275, 0.5036934149258391, 0.6362490283106208, 0.3181245141553104, 0.49526633478103915, 0.4733370940096055, 0.49951090196688214, 0.1525398367182696, 0.1525398367182696, 0.6101593468730784, 0.6966482743325252, 0.4215992426929772, 0.4215992426929772, 0.2831629568399614, 0.5663259136799228, 0.14433214982790193, 0.3969134120267303, 0.3969134120267303, 0.036083037456975484, 0.6892174737255546, 0.17230436843138866, 0.05743478947712956, 0.05743478947712956, 0.7657665493395832, 0.6588775483876131, 0.46181552272924037, 0.4350814335247129, 0.8206502807804128, 0.14361379913657224, 0.02051625701951032, 0.5458046780951074, 0.10916093561902149, 0.32748280685706443, 0.054580467809510744, 0.48706891862551555, 0.4553035543673298, 0.031765364258185796, 0.010588454752728599, 0.39774060576584863, 0.5192679907592759, 0.41541439260742075, 0.06288494048199782, 0.5659644643379803, 0.37730964289198693, 0.2035108608300845, 0.6105325824902534, 0.5071260443511092, 0.36881894134626125, 0.04610236766828266, 0.04610236766828266, 0.04610236766828266, 0.38114681647588383, 0.44467128588853116, 0.1270489388252946, 0.5131102235273357, 0.3610775647044214, 0.09502041176432142, 0.019004082352864285, 0.8524717956462748, 0.07749743596784317, 0.038748717983921585, 0.41215413872406365, 0.5593520454112293, 0.009813193779144374, 0.009813193779144374, 0.15178376158880416, 0.4174053443692114, 0.4174053443692114, 0.23754606822390542, 0.7126382046717163, 0.8918294823786098, 0.25380945228685187, 0.16920630152456792, 0.25380945228685187, 0.25380945228685187, 0.2414088306193673, 0.2414088306193673, 0.362113245929051, 0.8675663513805836, 0.8671711464413643, 0.6743452146114965, 0.16858630365287414, 0.8861043111510297, 0.3232558637781907, 0.5387597729636512, 0.10775195459273025, 0.4997656694646154, 0.514014487874217, 0.520071161793449, 0.08616538850579243, 0.17233077701158486, 0.6893231080463395, 0.22614540515804865, 0.6784362154741459, 0.16484257703142988, 0.16484257703142988, 0.6593703081257195, 0.5503114409097074, 0.0891205397776181, 0.1782410795552362, 0.6238437784433266, 0.6339136557152641, 0.3169568278576321, 0.4773889949442452, 0.8052938478799667, 0.15099259647749375, 0.5109330411706005, 0.3822763447327559, 0.19113817236637795, 0.19113817236637795, 0.19113817236637795, 0.5145852112950448, 0.10291704225900895, 0.4116681690360358], "Term": ["actively", "actively", "addition", "addition", "addition", "advised", "ago", "agree", "agree", "agree", "agree", "agreement", "agreement", "agreement", "agreement", "agreements", "agreements", "agreements", "agreements", "angeles", "antonio", "applications", "applications", "approval", "approval", "approval", "approvals", "aquila", "aquilia", "arbitration", "arbitration", "arbitration", "argentina", "argentine", "aronowitz", "aronowitz", "arrange", "arrange", "arts", "ashland", "assignment", "attached", "attached", "attached", "attached", "august", "august", "avoid", "aware", "back", "back", "back", "back", "bad", "bandwidth", "bank", "bank", "bank", "banks", "becker", "benefit", "blank", "blumenthal", "blumenthal", "blumenthal", "boys", "burns", "buyer", "cab", "cabs", "call", "call", "call", "canada", "canada", "canada", "canadian", "canadian", "canadian", "canadian", "canceled", "capital", "capital", "capital", "cargill", "carol", "cash", "cash", "cash", "catch", "cemex", "cemex", "certificate", "chemicals", "cindy", "cindy", "citibank", "city", "clean", "clli", "club", "collateral", "collateral", "collateral", "column", "columns", "commercial", "commercial", "commercial", "commissioned", "commodity", "commodity", "commodity", "company", "company", "completed", "completed", "completed", "confidentiality", "confidentiality", "conflicts", "consists", "contacts", "contacts", "contracts", "contracts", "contracts", "corbally", "corp", "corp", "corp", "corp", "counsel", "counsel", "counterparties", "counterparties", "counterparties", "counterparties", "counterparties", "counterparty", "counterparty", "counterparty", "counterparty", "counterparty", "counterparty", "country", "country", "court", "court", "court", "courts", "courts", "courts", "coverage", "credit", "credit", "credit", "currency", "currency", "customer", "customer", "customer", "customer", "date", "date", "date", "date", "davis", "days", "deal", "deal", "deal", "dealers", "deals", "deals", "deals", "deemed", "deemed", "defined", "delaware", "delaware", "derivatives", "derivatives", "derivatives", "description", "description", "description", "descriptions", "descriptions", "desk", "desk", "desk", "detailed", "deutsche", "differ", "diligence", "dinner", "dinner", "distributed", "distributed", "divisions", "doc", "doc", "doc", "documentation", "documentation", "documentation", "documents", "documents", "documents", "domestic", "dow", "dress", "dso", "dsos", "due", "due", "dunnes", "ect", "ect", "ect", "ect", "effective", "effective", "effectively", "effort", "effort", "ena", "ena", "ena", "energy", "energy", "energy", "energy", "energy", "enron", "enron", "enron", "enron", "enron", "enroncredit", "enrononline", "enrononline", "enrononline", "entity", "entity", "entity", "eol", "eol", "est", "established", "europe", "europe", "europe", "evangelista", "expiration", "expiration", "familiar", "feedback", "fees", "ferrous", "file", "file", "financial", "financial", "financial", "fogata", "foreign", "form", "form", "formula", "forwarded", "forwarded", "forwarded", "forwarded", "forwarded", "frank", "frank", "futures", "gas", "gcp", "gcp", "global", "global", "global", "good", "good", "good", "group", "group", "group", "groups", "groups", "gtc", "gtc", "gtc", "gtcs", "gtcs", "gtcs", "gtcs", "gtys", "guidelines", "guru", "hdd", "hdd", "headquarters", "hedge", "hedge", "helpful", "hold", "hotel", "hou", "hou", "hou", "hou", "houstonstreet", "ill", "ill", "ill", "ill", "incorporation", "incorporation", "indicating", "info", "info", "info", "information", "information", "information", "inserted", "inserted", "interest", "interest", "interest", "internet", "internet", "intersection", "isda", "isda", "isda", "isdas", "jackson", "jackson", "japan", "jedi", "jeff", "jeff", "jones", "jones", "jones", "july", "juries", "jurisdictions", "jurisdictions", "kind", "kitchen", "kitchen", "kitchen", "language", "language", "language", "law", "law", "law", "law", "lees", "legal", "legal", "legal", "legal", "leonardo", "leonardo", "link", "link", "link", "lisa", "loaded", "loading", "lobby", "loi", "london", "london", "long", "long", "long", "lorraine", "los", "lost", "mail", "mail", "mail", "management", "management", "managment", "managment", "mark", "mark", "mark", "mark", "mark", "market", "market", "market", "master", "master", "master", "master", "masters", "matrix", "matrix", "mccullough", "meaning", "measure", "meet", "meet", "meeting", "meeting", "meeting", "meetings", "meetings", "meetings", "member", "member", "members", "members", "mentioned", "mentioned", "merchant", "merchants", "merger", "message", "message", "message", "message", "message", "mexico", "michael", "michael", "michael", "mile", "miles", "month", "month", "months", "morning", "morning", "morning", "ndas", "ndas", "necessarily", "needed", "needed", "needed", "negotiation", "notify", "nova", "npa", "number", "number", "number", "number", "nxx", "nymex", "nymex", "nymex", "offered", "offered", "offered", "offering", "offering", "office", "office", "office", "office", "omnet", "online", "online", "online", "pacheco", "pacheco", "paso", "perfection", "perfection", "perform", "performance", "performance", "phone", "phone", "phone", "physical", "physical", "physical", "physical", "placing", "point", "point", "point", "pooling", "power", "power", "power", "precedence", "price", "product", "product", "product", "product", "products", "products", "products", "products", "purpose", "quantity", "question", "question", "question", "quote", "quoted", "rate", "rate", "real", "real", "reason", "reason", "receive", "remain", "remember", "remember", "request", "request", "request", "reservations", "response", "responsibility", "responsibility", "restaurant", "review", "review", "review", "reviewers", "reviews", "revised", "revised", "revised", "revised", "revised", "rex", "rhett", "ride", "risk", "risk", "risk", "rmt", "rmt", "robert", "robert", "robert", "rohauer", "rsvpd", "samuel", "san", "san", "schedule", "schedule", "schedule", "scheduling", "scotia", "secondment", "secondment", "sell", "send", "send", "send", "sessions", "settlements", "sheri", "signed", "signed", "singapore", "site", "site", "slot", "sounds", "sounds", "southwest", "split", "sport", "submitted", "submitted", "submitted", "subsidiary", "suggested", "suggested", "suite", "suite", "swap", "swap", "swap", "swap", "system", "system", "system", "system", "systems", "tab", "table", "tabs", "tana", "tana", "tana", "tax", "tax", "tax", "tax", "taylor", "taylor", "taylor", "taylor", "tend", "term", "term", "termination", "termination", "termination", "test", "test", "time", "time", "time", "time", "time", "tomorrow", "tomorrow", "tomorrow", "trade", "trade", "trade", "trade", "traded", "traded", "traded", "trading", "trading", "trading", "trading", "transaction", "transaction", "transaction", "transactions", "transactions", "treasury", "type", "type", "type", "type", "types", "types", "types", "unit", "units", "update", "update", "usa", "vacation", "vacation", "vacation", "vance", "vastar", "venezuela", "version", "version", "version", "versus", "versus", "volume", "volume", "volume", "waste", "weather", "weather", "weather", "website", "website", "wednesdays", "week", "week", "wild", "yesterday", "yesterday", "yesterday", "yesterday", "york", "york", "york"]}, "R": 30, "lambda.step": 0.01, "plot.opts": {"xlab": "PC1", "ylab": "PC2"}, "topic.order": [5, 7, 10, 3, 1, 9, 8, 2, 4, 6]};
+
+   !function(LDAvis){
+       new LDAvis("#" + "ldavis_el1432891397175660861444859021390", ldavis_el1432891397175660861444859021390_data);
+   }(LDAvis);
+
+
+</script>

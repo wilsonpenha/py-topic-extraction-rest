@@ -1,0 +1,22 @@
+{
+	"body": [
+		"That is fine ... I\u0027m off to Red Deer this weekend for Mother\u0027s Day and my \nbrother\u0027s B-Day but I\u0027ll catch you next week.\n\nBeautiful day in downtown Calgary.\n\nChris"
+	],
+	"emailAddresses": {
+		"from": [{
+			"address": "chris.dorland@enron.com",
+			"organization": "enron.com"
+		}],
+		"to": [{
+			"address": "kerrie_murray@telus.com",
+			"organization": "telus.com"
+		}]
+	},
+	"hasAttachement": false,
+	"isCompressed": false,
+	"values": {},
+	"timeStamp": 957967260000,
+	"id": "540757b9-83c1-4d6f-ba50-547eaebe7e6d",
+	"size": 651,
+	"size_compressed": -1
+}
